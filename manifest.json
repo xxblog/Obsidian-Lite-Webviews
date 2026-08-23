@@ -1,0 +1,9 @@
+{
+	"id": "no-autoplay",
+	"name": "No Autoplay · 网页静音 & 截图省内存",
+	"version": "5.4.3",
+	"minAppVersion": "1.1.0",
+	"description": "画布 / Excalidraw / 网页浏览器中的嵌入网页自动静音（范围可配）；截图省内存模式：网页平时只显示截图，点击卡片才加载真网页，离开后自动切回截图释放内存。",
+	"author": "zhan",
+	"isDesktopOnly": true
+}
