@@ -3,7 +3,7 @@
 const { Plugin, PluginSettingTab, Setting, Notice, Menu } = require('obsidian');
 
 /**
- * No Autoplay v5.4.3 · 网页静音 & 截图省内存
+ *  Lite Webviews v5.4.3 · 网页卡片轻量化
  *
  * 功能一（静音）：画布 / Excalidraw / 网页浏览器标签页中的嵌入网页（webview）
  * 自动静音，范围可在设置中多选。
@@ -714,31 +714,31 @@ class NoAutoplayPlugin extends Plugin {
 				src = wv.dataset.noAutoplaySrc || '';
 			}
 			if (!doc && !/^https?:/i.test(src || '')) {
-				new Notice('No Autoplay：该卡片没有可后台加载的网页内容');
+				new Notice('Lite Webviews：该卡片没有可后台加载的网页内容');
 				return;
 			}
 			if (doc && doc.length > MAX_SRCDOC_CAPTURE) {
-				new Notice('No Autoplay：快照内容过大（超过 data URL 上限），无法后台刷新');
+				new Notice('Lite Webviews：快照内容过大（超过 data URL 上限），无法后台刷新');
 				return;
 			}
 			// 尺寸门槛按占位层算：webview 元素可能已被移除，自身没有尺寸
 			if (this.settings.captureMinScreenPx) {
 				const rect = overlay.getBoundingClientRect();
 				if (Math.min(rect.width, rect.height) < this.settings.captureMinScreenPx) {
-					new Notice('No Autoplay：卡片太小，未刷新截图');
+					new Notice('Lite Webviews：卡片太小，未刷新截图');
 					return;
 				}
 			}
 			const img = await this.captureWithTempWebview(doc, src, parent, null);
 			const empty = !img || (typeof img.isEmpty === 'function' && img.isEmpty());
 			if (empty) {
-				new Notice('No Autoplay：截图刷新失败（页面未完成加载）');
+				new Notice('Lite Webviews：截图刷新失败（页面未完成加载）');
 				return;
 			}
 			const key = isIframe ? this.iframeKey(wv) : wv.dataset.noAutoplaySrc || '';
 			await this.saveScreenshot(key, img);
 			await this.refreshPlaceholderImage(wv, key, undefined);
-			new Notice('No Autoplay：截图已刷新');
+			new Notice('Lite Webviews：截图已刷新');
 		} finally {
 			delete wv.dataset.napRefreshing;
 			if (status && status.isConnected) status.remove();
@@ -750,11 +750,11 @@ class NoAutoplayPlugin extends Plugin {
 		const key = wv.tagName === 'IFRAME' ? this.iframeKey(wv) : wv.dataset.noAutoplaySrc || '';
 		const info = await this.existingCacheInfo(key);
 		if (!info) {
-			new Notice('No Autoplay：该卡片还没有截图可复制');
+			new Notice('Lite Webviews：该卡片还没有截图可复制');
 			return;
 		}
 		if (typeof ClipboardItem === 'undefined' || !navigator.clipboard || !navigator.clipboard.write) {
-			new Notice('No Autoplay：当前环境不支持复制图片到剪贴板');
+			new Notice('Lite Webviews：当前环境不支持复制图片到剪贴板');
 			return;
 		}
 		try {
@@ -771,9 +771,9 @@ class NoAutoplayPlugin extends Plugin {
 			const pngBlob = await new Promise((resolve) => canvas.toBlob(resolve, 'image/png'));
 			if (!pngBlob) throw new Error('canvas 导出失败');
 			await navigator.clipboard.write([new ClipboardItem({ 'image/png': pngBlob })]);
-			new Notice('No Autoplay：截图已复制到剪贴板');
+			new Notice('Lite Webviews：截图已复制到剪贴板');
 		} catch (e) {
-			new Notice('No Autoplay：复制截图失败（' + (e && e.message ? e.message : e) + '）');
+			new Notice('Lite Webviews：复制截图失败（' + (e && e.message ? e.message : e) + '）');
 		}
 	}
 
@@ -813,7 +813,7 @@ class NoAutoplayPlugin extends Plugin {
 						try {
 							window.open(src); // Obsidian 会把外部地址交给系统浏览器
 						} catch (err) {
-							new Notice('No Autoplay：打开浏览器失败');
+							new Notice('Lite Webviews：打开浏览器失败');
 						}
 					})
 			);
@@ -2366,7 +2366,7 @@ class NoAutoplayPlugin extends Plugin {
 		if (this.settings.killRendererOnSuspend && !this.remoteWebContents()) {
 			// 提前告知而非静默降级：用户升级 Obsidian 后此能力可能随版本消失
 			new Notice(
-				'No Autoplay：当前环境无法访问 electron.remote，"挂起时彻底卸载"不可用，将回退为仅置空页面。',
+				'Lite Webviews：当前环境无法访问 electron.remote，"挂起时彻底卸载"不可用，将回退为仅置空页面。',
 				6000
 			);
 		}
@@ -2857,7 +2857,7 @@ class NoAutoplaySettingsTab extends PluginSettingTab {
 	_display() {
 		const { containerEl } = this;
 		containerEl.empty();
-		containerEl.createEl('h2', { text: 'No Autoplay' });
+		containerEl.createEl('h2', { text: 'Lite Webviews · 网页卡片轻量化' });
 		containerEl.createEl('p', { text: '网页静音 & 截图省内存', cls: 'setting-item-description' });
 
 		// 总开关
