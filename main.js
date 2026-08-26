@@ -3,7 +3,7 @@
 const { Plugin, PluginSettingTab, Setting, Notice, Menu } = require('obsidian');
 
 /**
- *  Lite Webviews v5.4.3 · 网页卡片轻量化
+ * Lite Webviews v0.0.1 · 网页卡片轻量化
  *
  * 功能一（静音）：画布 / Excalidraw / 网页浏览器标签页中的嵌入网页（webview）
  * 自动静音，范围可在设置中多选。
@@ -11,42 +11,14 @@ const { Plugin, PluginSettingTab, Setting, Notice, Menu } = require('obsidian');
  * 功能二（截图省内存）：画布与 Excalidraw 的嵌入网页平时只显示截图（页面卸载，
  * 释放 100~400MB/张）；点击卡片（拖动不算）才加载真网页。
  *
- * 切回截图规则（v5.1）：
+ * 切回截图规则：
  * - 操作其他卡片/画布（点空白、其他卡片、拖动、缩放）→ 5 分钟（可设置，-1=永不）；
  * - 切走应用/非画布标签页 → 30 秒（可设置，-1=永不）；回到画布/窗口即取消；
- * - Esc / "收起"按钮 → 立即；
- * - "锁定"按钮 → 锁定后自动计时与 Esc 均免疫，仅"收起"按钮可收起；
- * - 网页内操作不触发任何计时（修复 Electron 误报失焦）。
+ * - Esc / "挂起"按钮 → 立即；
+ * - "保活"按钮 → 保活后自动计时与 Esc 均免疫，仅"挂起"按钮可挂起；
+ * - 网页内操作不触发任何计时。
  *
  * 提示与按钮使用 Obsidian 主题变量，自动适配明暗模式。
- *
- * v5.2：占位截图改用 app:// 资源地址（不再整张 base64 进 JS 堆，多卡挂起省数十 MB）；
- * 接管 popout 弹出窗口（观察器/样式/Esc/计时全覆盖）；缓存超限即时防抖清理；
- * data.json 损坏自动回退默认设置；"停止所有"与截图模式共用挂起状态机。
- *
- * v5.3：挂起卡片右键菜单（加载网页 / 刷新截图 / 复制截图 / 浏览器打开）；
- * 占位层左下角标注截图新鲜度（取缓存文件修改时间）。
- * v5.3.1：修复右键菜单操作后画布跟着鼠标漂移——右键按下被菜单吞掉 pointerup，
- * 画布平移态卡死；现拦截右键按下冒泡，画布不再进入平移态。
- * v5.3.2：根治上述漂移：菜单改为等右键松开、松开事件送达应用后再弹（macOS 的
- * contextmenu 在按下瞬间触发）；菜单关闭时再补发合成 pointerup/mouseup 收尾，
- * 兜住捕获阶段 arm 拖拽（stopPropagation 拦不住）的组件。
- * v5.3.3：修复"刷新截图"短暂出声——临时 webview 在 attach 前 setAudioMuted 无效；
- * 改为 attach/导航/加载各时机反复静音，srcdoc 快照另注入页内静音脚本。
- * v5.4.0：卡片按钮改为固定屏幕字号（设置"按钮字号 px"，默认 13），不再随画布缩放/
- * 卡片大小变化；按钮全部尺寸由字号派生并以 flex 排列；字号刷新并入 500ms 轮询，
- * 缩放后立即回正（原 5 秒 sweep 才纠正）。旧设置 buttonSizePct 自动清理。
- * v5.4.1：临时抓图 webview 全局限流（同时最多 3 个，排队逐个来，打开大画布不再
- * 瞬间孵化几十个渲染进程）；去掉按钮 CSS 字号下限，高倍放大也严格保持固定屏幕大小。
- * v5.4.2：修复插件重载后 live 卡片脱离管理——onunload 恢复页面时把元素标成 live，
- * 新实例的 liveCards 是空的，页面保持加载却没有按钮/自动计时/Esc；handle 现在重新
- * 收养无主 live 卡。静音钩子补上 did-attach 时机：快照重建的 webview 在 attach 前
- * setAudioMuted 是无效空调用，attach→dom-ready 间自动播放站点会漏出声音。
- * v5.4.3：性能优化——按钮字号轮询改画布级合并（缩放比例同画布共享，每画布只测
- * 一次布局，不再逐卡 offsetWidth+getBoundingClientRect，大画布每秒省几十次强制
- * 布局读取）；背景修复不再每次 sweep 重复 executeJavaScript（此前每张卡每 5 秒
- * 两次跨进程往返+页内样式重算，现只在首次接管与导航事件时注入），挂钩改以本实例
- * bgHandlers 为准，插件重载后能正确重挂监听。
  */
 
 const EMBED_SELECTOR = 'iframe, webview';
@@ -324,7 +296,7 @@ class NoAutoplayPlugin extends Plugin {
 	/* ---------------- 工具 ---------------- */
 
 	cacheDir() {
-		return `${this.app.vault.configDir}/plugins/no-autoplay/cache`;
+		return `${this.app.vault.configDir}/plugins/lite-webviews/cache`;
 	}
 
 	effectiveScreenshotQuality() {

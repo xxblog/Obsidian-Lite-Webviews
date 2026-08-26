@@ -1,7 +1,7 @@
 {
-	"id": "no-autoplay",
+	"id": "lite-webviews",
 	"name": "Lite Webviews · 网页卡片轻量化",
-	"version": "5.4.3",
+	"version": "0.0.1",
 	"minAppVersion": "1.1.0",
 	"description": "画布 / Excalidraw / 网页浏览器中的嵌入网页平时只显示截图（每张释放 100~400MB 内存），点击卡片才加载真实网页，离开后自动切回截图；网页全程自动静音（范围可配）。",
 	"author": "zhan",
