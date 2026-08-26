@@ -1,9 +1,4 @@
 # Lite Webviews · 网页卡片轻量化
-
-> 作者：zhan（GitHub：xxblog）
->
-> 当前版本：`0.0.1`
-
 ## 项目说明
 
 这是一个 **Vibe Coding 项目**，主要是给我自己使用而开发的 Obsidian 桌面端插件。
