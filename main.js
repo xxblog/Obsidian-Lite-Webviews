@@ -276,7 +276,7 @@ class NoAutoplayPlugin extends Plugin {
 	tempCaptureSlots = 0; // 当前占用的临时抓图槽位
 	tempCaptureQueue = []; // 等待槽位的抓图任务（先进先出）
 	timer = null;
-	otherTimer = null;
+	otherTimers = new Map(); // leafEl -> 挂起计时器（每叶独立计时，操作其他叶子不打断本叶计时）
 	blurTimer = null;
 	blurGuard = null;
 	webviewFocused = false;
@@ -934,8 +934,11 @@ class NoAutoplayPlugin extends Plugin {
 		}
 	}
 
-	/** 修复网页背景透明：在 webview 加载/导航后注入低优先级不透明兜底背景 */
+	/** 修复网页背景透明：在 webview 加载/导航后注入低优先级不透明兜底背景。
+	 *  透明透出控件是画布/Excalidraw 嵌入特有的合成问题；网页浏览器标签页整页
+	 *  显示不存在该问题，跳过后每次导航可省两次跨进程 executeJavaScript。 */
 	applyBackgroundFix(wv) {
+		if (categorize(wv) === 'webviewer') return;
 		const want = !!this.settings.fixTransparentBackground;
 		const cleanup = () => {
 			const fix = this.bgHandlers.get(wv);
@@ -1910,23 +1913,33 @@ class NoAutoplayPlugin extends Plugin {
 
 	/* ---------------- 计时器（切回截图） ---------------- */
 
-	/** 操作其他卡片/画布后计时：只收起该叶子内未锁定的 live 卡片 */
+	/** 操作其他卡片/画布后计时：只收起该叶子内未锁定的 live 卡片。
+	 *  计时器按叶子独立保存：并排多个画布时，操作画布 B 不再顶掉画布 A 已在
+	 *  跑的计时（此前全局单计时器会让 A 的卡片一直不被挂起）。 */
 	restartOtherTimer(leafEl) {
-		if (this.otherTimer) {
-			clearTimeout(this.otherTimer);
-			this.otherTimer = null;
+		if (!leafEl) return;
+		const prev = this.otherTimers.get(leafEl);
+		if (prev) clearTimeout(prev);
+		if (this.settings.otherCardTimeoutMs < 0) {
+			this.otherTimers.delete(leafEl);
+			return;
 		}
-		if (this.settings.otherCardTimeoutMs < 0) return;
-		this.otherTimer = setTimeout(() => {
-			this.otherTimer = null;
-			for (const wv of [...this.liveCards]) {
-				if (!wv.isConnected || this.isLocked(wv)) continue;
-				if (leafEl && this.leafElOf(wv) === leafEl) this.switchToScreenshot(wv).catch(() => {});
-			}
-		}, this.settings.otherCardTimeoutMs);
+		this.otherTimers.set(
+			leafEl,
+			setTimeout(() => {
+				this.otherTimers.delete(leafEl);
+				for (const wv of [...this.liveCards]) {
+					if (!wv.isConnected || this.isLocked(wv)) continue;
+					if (this.leafElOf(wv) === leafEl) this.switchToScreenshot(wv).catch(() => {});
+				}
+			}, this.settings.otherCardTimeoutMs)
+		);
 	}
 
-	/** 切走应用/标签页后计时：收起所有未锁定的 live 卡片 */
+	/** 切走应用/标签页后计时：收起未被查看的 live 卡片。
+	 *  主窗口 ↔ popout 之间的切换只让一侧窗口 blur，不能当成"切走应用"一刀切；
+	 *  到期时跳过"正被查看"的卡片（见 isViewingCard），应用整体失焦时没有
+	 *  任何窗口持有焦点，全部挂起（与原行为一致）。 */
 	restartBlurTimer() {
 		if (this.blurTimer) {
 			clearTimeout(this.blurTimer);
@@ -1935,18 +1948,43 @@ class NoAutoplayPlugin extends Plugin {
 		if (this.settings.appBlurTimeoutMs < 0) return;
 		this.blurTimer = setTimeout(() => {
 			this.blurTimer = null;
+			let activeEl = null;
+			try {
+				const ws = this.app.workspace;
+				const leaf = ws
+					? typeof ws.getActiveLeaf === 'function'
+						? ws.getActiveLeaf()
+						: ws.activeLeaf
+					: null;
+				activeEl = leaf && leaf.view && leaf.view.containerEl ? leaf.view.containerEl : null;
+			} catch (e) {
+				/* ignore */
+			}
 			for (const wv of [...this.liveCards]) {
 				if (!wv.isConnected || this.isLocked(wv)) continue;
+				if (activeEl && this.isViewingCard(wv, activeEl)) continue;
 				this.switchToScreenshot(wv).catch(() => {});
 			}
 		}, this.settings.appBlurTimeoutMs);
 	}
 
-	cancelTimers() {
-		if (this.otherTimer) {
-			clearTimeout(this.otherTimer);
-			this.otherTimer = null;
+	/** 卡片是否正被查看：焦点就在卡片网页内（Electron 里 activeElement 会指向
+	 *  webview/iframe 元素，pollFocus 已把它记到 dataset），或所在窗口持有焦点
+	 *  且卡片就在当前活动视图内。 */
+	isViewingCard(wv, activeEl) {
+		try {
+			if (wv.dataset.noAutoplayFocused === '1') return true;
+			const doc = wv.ownerDocument;
+			if (!doc || typeof doc.hasFocus !== 'function' || !doc.hasFocus()) return false;
+			return !!(activeEl && activeEl.contains(wv));
+		} catch (e) {
+			return false;
 		}
+	}
+
+	cancelTimers() {
+		for (const t of this.otherTimers.values()) clearTimeout(t);
+		this.otherTimers.clear();
 		if (this.blurTimer) {
 			clearTimeout(this.blurTimer);
 			this.blurTimer = null;
@@ -2226,6 +2264,13 @@ class NoAutoplayPlugin extends Plugin {
 		for (const [parent] of [...this.removedElements]) {
 			if (!parent || !parent.isConnected) this.removedElements.delete(parent);
 		}
+		// 叶子被关掉/重排后清掉残留计时器（最长 otherCardTimeoutMs 后也会自清）
+		for (const [leafEl, t] of [...this.otherTimers]) {
+			if (!leafEl.isConnected) {
+				clearTimeout(t);
+				this.otherTimers.delete(leafEl);
+			}
+		}
 	}
 
 	sweep() {
@@ -2303,14 +2348,18 @@ class NoAutoplayPlugin extends Plugin {
 			this.cancelTimers();
 		};
 
-		// Esc：收起所有未锁定的 live 卡片
+		// Esc：收起按键所在窗口内未锁定的 live 卡片
 		this.escHandler = (e) => {
 			if (e.key !== 'Escape') return;
 			// 在输入框/文本编辑区按 Esc 是退出编辑，不应顺手把网页全挂起
 			const t = e.target;
 			if (t && t.closest && t.closest('input, textarea, select, [contenteditable="true"]')) return;
+			// 处理器按窗口挂载：只处理本窗口的卡片，主窗口按 Esc 不应把
+			// popout 里正在使用的卡片一起挂起
+			const win = e.view || (t && t.ownerDocument && t.ownerDocument.defaultView) || null;
 			for (const wv of [...this.liveCards]) {
 				if (this.isLocked(wv)) continue;
+				if (win && this.viewOf(wv) !== win) continue;
 				this.switchToScreenshot(wv).catch(() => {});
 			}
 		};
@@ -2427,6 +2476,9 @@ class NoAutoplayPlugin extends Plugin {
 						}
 						return;
 					}
+					// 只停止真正的网页（http/data 来源）。画布中的 PDF 等文件卡片同样
+					// 由 iframe 渲染（src 为 app:// 本地地址），清空它们只会让卡片白屏
+					if (!isWebSrc(el)) return;
 					if (!el.dataset.noAutoplaySrc) {
 						try {
 							el.dataset.noAutoplaySrc = el.src || '';
