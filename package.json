@@ -1,0 +1,25 @@
+{
+	"name": "lite-webviews",
+	"version": "0.0.3",
+	"description": "Shows screenshots instead of live webpage embeds in Canvas / Excalidraw / web viewer to save memory; auto-suspends and auto-mutes.",
+	"main": "main.js",
+	"scripts": {
+		"dev": "node esbuild.config.mjs",
+		"build": "tsc -noEmit -skipLibCheck && node esbuild.config.mjs production"
+	},
+	"keywords": [
+		"obsidian",
+		"obsidian-plugin",
+		"canvas",
+		"excalidraw",
+		"webview"
+	],
+	"license": "MIT",
+	"devDependencies": {
+		"@types/node": "^16.11.6",
+		"builtin-modules": "^3.3.0",
+		"esbuild": "^0.20.2",
+		"obsidian": "latest",
+		"typescript": "^5.4.5"
+	}
+}

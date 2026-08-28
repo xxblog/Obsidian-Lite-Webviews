@@ -1,87 +1,91 @@
 # Lite Webviews · 网页卡片轻量化
 
-## 项目说明
+An Obsidian desktop plugin that keeps embedded webpages from eating memory and making noise: embeds in Canvas / Excalidraw / web viewer show a static screenshot instead of a live page, load the real page only when you click the card, and auto-mute everywhere.
 
-这是一个 **Vibe Coding 项目**，主要是给我自己使用而开发的 Obsidian 桌面端插件。
+> [中文说明](#中文说明)见下文。
 
-开发它是因为我在 Obsidian 画布 / Excalidraw 中放了太多嵌入网页，导致：
+## Features
 
-- 浏览网页时经常自动出声；
-- 很多网页就算不打开也一直占着内存。
+- **Auto-mute**: embedded webpages in Canvas, Excalidraw, and web viewer tabs are muted by default (scope is configurable per area).
+- **Screenshot mode**: suspended cards show a screenshot and unload the real page, freeing roughly 100–400 MB per card. Click the card to load the real page; dragging never triggers a load.
+- **Auto-suspend**: cards switch back to screenshots after you interact with other cards, leave the tab, or switch apps (delays configurable; per-card "keep alive" exempts it).
+- **Card actions**: hover the top-right corner of a live card for mute / keep-alive / suspend buttons; right-click a suspended card for load / refresh screenshot / copy screenshot / open in browser.
+- **Commands**: toggle screenshot mode, stop all embeds, restore all embeds, keep-alive / suspend / refresh screenshot for the current card — all bindable to hotkeys.
+- **Memory & performance**: optional "fully unload on suspend" (kills the renderer process), bounded concurrent background captures, automatic screenshot cache cleanup.
+- **UX**: fixed on-screen button size regardless of canvas zoom, adapts to light/dark themes, works in popout windows.
 
-所以这个插件主要解决两件事：
+## Installation
 
-1. **自动静音**：画布、Excalidraw、网页浏览器中的嵌入网页默认静音。
-2. **截图省内存**：不使用的嵌入网页只显示截图，点击后才加载真实网页，离开后自动切回截图。
+### From the community plugin store
 
-由于是 **Vibe Coding 产物 + 个人自用项目**，以下特点会比较明显：
+Once approved: Settings → Community plugins → Browse → search **Lite Webviews**.
 
-- 功能优先满足我自己的使用场景；
-- 不保证完整的社区插件规范；
-- 维护节奏随缘，欢迎使用，也欢迎提 Issue / 反馈 / Fork；
-- 如果你想长期使用，建议先自己测试一下再决定是否依赖。
+### Via BRAT (before store approval)
 
-## 功能特性
+1. Install the [BRAT](https://github.com/TfTHacker/obsidian42-brat) plugin.
+2. BRAT → Add Beta Plugin → enter `xxblog/Obsidian-Lite-Webviews`.
+3. Enable **Lite Webviews** in Settings → Community plugins.
 
-- **自动静音**
-  - 画布（Canvas）中的网页卡片
-  - Excalidraw 中的嵌入网页
-  - Obsidian 网页浏览器标签页
-  - 可分别配置静音范围
-- **截图省内存**
-  - 平时只显示截图，页面被卸载，每张可释放约 100~400MB 内存
-  - 点击卡片才加载真实网页，拖动不会触发加载
-  - 操作其他卡片、画布空白处或切走应用后自动挂起
-- **卡片操作**
-  - 卡片按钮：静音状态提示、保活、立即挂起
-  - 挂起卡片右键菜单：加载网页 / 刷新截图 / 复制截图 / 在浏览器打开
-  - `Esc` 立即挂起当前未锁定卡片
-- **内存与性能**
-  - 支持“挂起时彻底卸载”实验选项
-  - 临时抓图有并发限制，避免打开大画布时瞬间启动大量渲染进程
-  - 截图缓存自动清理，也可手动清理
-- **体验**
-  - 按钮使用固定屏幕字号，不随画布缩放变化
-  - 自动适配 Obsidian 明暗主题
-  - 支持弹窗（popout）窗口中的嵌入网页
+### Manual
 
-## 安装
+1. Download `main.js` and `manifest.json` from the [latest release](https://github.com/xxblog/Obsidian-Lite-Webviews/releases).
+2. Place them in `<vault>/.obsidian/plugins/lite-webviews/`.
+3. Enable the plugin in Settings → Community plugins.
 
-### 手动安装
+Desktop only (`isDesktopOnly: true`), requires Obsidian 1.1.0+.
 
-1. 下载 `main.js` 和 `manifest.json`。
-2. 放到 Obsidian 仓库目录：
-   ```text
-   .obsidian/plugins/lite-webviews/
-   ```
-3. 在 Obsidian 设置 → 第三方插件中启用。
+## Development
 
-> 仅支持桌面版（`isDesktopOnly: true`），需要 Obsidian 1.1.0 或更高版本。
+```bash
+npm install
+npm run dev    # watch mode, rebuilds main.js on change
+npm run build  # type-check + production build
+```
 
-### 从 GitHub 安装
+Source lives in `src/` (TypeScript); `main.js` at the repo root is the build artifact — do not edit it directly.
 
-1. 克隆本仓库到：
-   ```text
-   .obsidian/plugins/lite-webviews/
-   ```
-2. 在 Obsidian 的“第三方插件”中刷新并启用。
+## Notes
 
-## 使用方式
+- Screenshots are cached under `.obsidian/plugins/lite-webviews/cache/` (auto-created). If you use Obsidian Sync or another sync tool, exclude that folder to avoid syncing large images.
+- Settings are stored in `data.json` in the plugin folder.
 
-- 卡片默认显示截图；**单击**卡片加载真实网页，**拖动**不会触发加载。
-- 真网页卡片上会出现「挂起」「保活」按钮。
-  - 「保活」后，自动挂起计时和 `Esc` 不生效，只有点击「挂起」才切回截图。
-- 在挂起截图上右键，可以快速刷新截图、复制截图或在浏览器打开。
+---
 
-## 目录说明
+## 中文说明
+
+这是一个 **Vibe Coding 项目**，主要为我自己的使用而开发。做它是因为我在 Obsidian 画布 / Excalidraw 中放了太多嵌入网页，导致：浏览网页时经常自动出声；很多网页就算不打开也一直占着内存。所以这个插件解决两件事：**自动静音** 和 **截图省内存**。
+
+由于是个人自用项目，功能优先满足我自己的场景，维护节奏随缘，欢迎使用、提 Issue / 反馈 / Fork；长期使用前建议先自己测试。
+
+### 功能特性
+
+- **自动静音**：画布（Canvas）、Excalidraw、网页浏览器标签页中的嵌入网页默认静音，范围可分别配置。
+- **截图省内存**：平时只显示截图、页面被卸载（每张释放约 100~400MB）；点击卡片才加载真实网页，拖动不会触发加载。
+- **自动挂起**：操作其他卡片、画布空白处或切走应用后自动切回截图（时长可配）；「保活」卡片免疫自动挂起和 `Esc`。
+- **卡片操作**：真网页卡片右上角有「静音 / 保活 / 挂起」按钮；挂起卡片右键菜单支持加载网页 / 刷新截图 / 复制截图 / 在浏览器打开。
+- **命令**（均可绑定快捷键）：切换截图省内存模式、停止所有嵌入网页、恢复所有嵌入网页、保活/取消保活当前卡片、挂起当前卡片、刷新当前卡片截图。
+- **内存与性能**：可选「挂起时彻底卸载」（杀渲染进程）、临时抓图并发限制、截图缓存自动/手动清理。
+- **体验**：按钮固定屏幕字号不随画布缩放、自动适配明暗主题、支持弹窗（popout）窗口。
+
+### 使用方式
+
+- 卡片默认显示截图；**单击**加载真网页，**拖动**不会触发。
+- 「保活」后自动挂起计时和 `Esc` 不生效，只有点击「挂起」才切回截图。
+- 在挂起截图上右键，可刷新截图、复制截图或在浏览器打开。
+
+### 目录说明
 
 ```text
 .
 ├── manifest.json   # 插件信息与版本
-├── main.js         # 插件主体代码
-└── README.md       # 本说明
+├── versions.json   # 版本与最低 Obsidian 版本映射（社区市场上架用）
+├── main.js         # 构建产物（请勿直接修改）
+├── src/            # TypeScript 源码
+└── cache/          # 截图缓存（运行时自动生成）
 ```
+
+截图缓存在 `cache/` 目录，使用 Obsidian Sync 等同步工具时建议排除该目录；插件设置保存在 `data.json`。
 
 ## License
 
-本项目采用 [MIT License](LICENSE)。你可以自由使用、修改、分发，包括用于商业项目。
+[MIT](LICENSE) — 你可以自由使用、修改、分发，包括用于商业项目。

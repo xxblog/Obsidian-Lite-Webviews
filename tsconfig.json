@@ -1,0 +1,16 @@
+{
+	"compilerOptions": {
+		"baseUrl": ".",
+		"inlineSourceMap": true,
+		"inlineSources": true,
+		"module": "ESNext",
+		"target": "ES2018",
+		"allowJs": true,
+		"noImplicitAny": false,
+		"strictNullChecks": false,
+		"moduleResolution": "node",
+		"isolatedModules": true,
+		"lib": ["DOM", "DOM.Iterable", "ES2020"]
+	},
+	"include": ["src/**/*.ts"]
+}
