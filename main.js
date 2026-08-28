@@ -3,7 +3,7 @@
 const { Plugin, PluginSettingTab, Setting, Notice, Menu } = require('obsidian');
 
 /**
- * Lite Webviews v0.0.1 · 网页卡片轻量化
+ * Lite Webviews · 网页卡片轻量化（版本号以 manifest.json 为准）
  *
  * 功能一（静音）：画布 / Excalidraw / 网页浏览器标签页中的嵌入网页（webview）
  * 自动静音，范围可在设置中多选。
@@ -36,6 +36,9 @@ const MAX_SRCDOC_CAPTURE = 1500000;
 // 同时存活的临时抓图 webview 上限：打开大画布时几十张卡会同时后台补拍，
 // 不限流就瞬间孵化等量渲染进程（CPU/内存尖峰），排队逐个来
 const MAX_TEMP_CAPTURES = 3;
+// 全量兜底扫描间隔：DOM 变化已由 MutationObserver 覆盖，sweep 只是漏接管时的保险，
+// 间隔不必太短，避免大画布下频繁全文档 querySelectorAll
+const SWEEP_INTERVAL_MS = 10000;
 
 // 修复背景透明：仅当页面自身 html/body 背景确实透明时才补充白色背景。
 // 如果站点已有自己的背景色（包括深色主题），则不干预，避免把黑底站点改白。
@@ -272,10 +275,10 @@ class NoAutoplayPlugin extends Plugin {
 	winObservers = new Map(); // MutationObserver -> 所属窗口
 	cacheBytes = -1; // 缓存总字节的内存记账（-1 = 未知，cleanupCache 时校准）
 	cleanupSoonTimer = null; // 缓存超限清理的防抖句柄
+	saveTimer = null; // 设置写盘的防抖句柄
 	warnedLargeDoc = false; // 超大快照跳过抓图只警告一次
 	tempCaptureSlots = 0; // 当前占用的临时抓图槽位
 	tempCaptureQueue = []; // 等待槽位的抓图任务（先进先出）
-	timer = null;
 	otherTimers = new Map(); // leafEl -> 挂起计时器（每叶独立计时，操作其他叶子不打断本叶计时）
 	blurTimer = null;
 	blurGuard = null;
@@ -404,6 +407,15 @@ class NoAutoplayPlugin extends Plugin {
 		}, 2000);
 	}
 
+	/** 设置写盘防抖：设置页连续调整时合并为一次写入；onunload 会尽力 flush */
+	saveSettings() {
+		if (this.saveTimer) clearTimeout(this.saveTimer);
+		this.saveTimer = setTimeout(() => {
+			this.saveTimer = null;
+			this.saveData(this.settings).catch(() => {});
+		}, 400);
+	}
+
 	abToDataUrl(ab, mime) {
 		return new Promise((resolve) => {
 			const blob = new Blob([ab], { type: mime });
@@ -488,16 +500,30 @@ class NoAutoplayPlugin extends Plugin {
 			if (!data || data.length < 100) return;
 			await this.ensureCacheDir();
 			const adapter = this.app.vault.adapter;
+			// 记账按差额：覆盖写/删除另一格式旧文件前先扣除旧大小，
+			// 否则同一地址反复抓图会让 cacheBytes 虚高、缓存清理被提前触发
+			let delta = data.length;
 			// 换质量档后另一格式的旧缓存已失效，顺手删掉避免同 hash 双份占用
 			try {
 				const other = this.cachePathFor(src, useJpeg ? 'png' : 'jpg');
-				if (await adapter.exists(other)) await adapter.remove(other);
+				if (await adapter.exists(other)) {
+					const st = await adapter.stat(other);
+					if (st && st.size) delta -= st.size;
+					await adapter.remove(other);
+				}
+			} catch (e) {
+				/* ignore */
+			}
+			const targetPath = this.cachePathFor(src, useJpeg ? 'jpg' : 'png');
+			try {
+				const st = await adapter.stat(targetPath);
+				if (st && st.size) delta -= st.size;
 			} catch (e) {
 				/* ignore */
 			}
 			const ab = data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength);
-			await adapter.writeBinary(this.cachePathFor(src, useJpeg ? 'jpg' : 'png'), ab);
-			this.noteCacheDelta(data.length);
+			await adapter.writeBinary(targetPath, ab);
+			this.noteCacheDelta(delta);
 		} catch (e) {
 			/* 截图保存失败不致命 */
 		}
@@ -902,7 +928,7 @@ class NoAutoplayPlugin extends Plugin {
 	/** 按当前设置把 webview 置为静音/非静音，并挂跳转补刀钩子 */
 	applyMuteState(wv, cat) {
 		const want = this.shouldMute(wv, cat);
-		// sweep 每 5 秒会重入一次；状态没变就不重复调用 setAudioMuted，减少对音频播放的干扰
+		// sweep 每轮会重入一次；状态没变就不重复调用 setAudioMuted，减少对音频播放的干扰
 		if (wv.dataset.noAutoplayMuteApplied !== String(want)) {
 			try {
 				if (typeof wv.setAudioMuted === 'function') {
@@ -1082,6 +1108,8 @@ class NoAutoplayPlugin extends Plugin {
 
 	/** 轮询检测焦点（Electron 的 webview focus/blur 事件不可靠，双通道保险） */
 	pollFocus() {
+		// 完全没有受管卡片时跳过，避免纯笔记/无画布场景下的常驻空转
+		if (this.liveCards.size === 0 && this.sizeObservers.size === 0) return;
 		for (const wv of this.liveCards) {
 			if (!wv.isConnected) continue;
 			// 每张卡用自己窗口的 activeElement（popout 里的 webview 不在主窗口焦点链上）
@@ -2023,7 +2051,7 @@ class NoAutoplayPlugin extends Plugin {
 				this.applyIframePlugins(el);
 			}
 		} else if (this.settings.muteScope[cat]) {
-			// 只移除 autoplay 权限；不要做 el.src = el.src，那会让普通 iframe 每 5 秒被 sweep 强制刷新一次
+			// 只移除 autoplay 权限；不要做 el.src = el.src，那会让普通 iframe 每轮 sweep 被强制刷新一次
 			stripAutoplayPermission(el);
 		}
 
@@ -2148,7 +2176,9 @@ class NoAutoplayPlugin extends Plugin {
 			childList: true,
 			subtree: true,
 			attributes: true,
-			attributeFilter: ['src', 'class', 'srcdoc'],
+			// 不监听 class：子树内任意元素的 class 抖动（画布选区/hover）都会触发回调，
+			// 代价远大于收益；类名晚到的元素由 sweep 兜底重新识别。
+			attributeFilter: ['src', 'srcdoc'],
 		});
 		return obs;
 	}
@@ -2178,10 +2208,11 @@ class NoAutoplayPlugin extends Plugin {
 			injectStyles(win.document);
 			const obs = this.attachObserver(win.document);
 			if (obs) this.winObservers.set(obs, win);
-			win.addEventListener('blur', this.blurHandler);
-			win.addEventListener('focus', this.focusHandler);
-			win.addEventListener('keydown', this.escHandler);
-			win.addEventListener('pointerdown', this.pointerHandler, true);
+			// registerDomEvent：插件卸载时自动摘除；窗口关闭时仍由 detachWindow 手动摘
+			this.registerDomEvent(win, 'blur', this.blurHandler);
+			this.registerDomEvent(win, 'focus', this.focusHandler);
+			this.registerDomEvent(win, 'keydown', this.escHandler);
+			this.registerDomEvent(win, 'pointerdown', this.pointerHandler, true);
 			this.handleTree(win.document); // popout 里可能带着现成的嵌入卡片
 		} catch (e) {
 			/* ignore */
@@ -2401,10 +2432,11 @@ class NoAutoplayPlugin extends Plugin {
 		this.app.workspace.onLayoutReady(() => {
 			if (!this._unloaded) this.sweep();
 		});
-		this.timer = setInterval(() => this.sweep(), 5000);
+		// registerInterval：卸载时自动清理，无需在 onunload 手动 clear
+		this.registerInterval(window.setInterval(() => this.sweep(), SWEEP_INTERVAL_MS));
 		// 缓存清理：启动时一次 + 每 24 小时一次
 		this.cleanupCache();
-		this.cacheCleanupTimer = setInterval(() => this.cleanupCache(), 24 * 3600 * 1000);
+		this.registerInterval(window.setInterval(() => this.cleanupCache(), 24 * 3600 * 1000));
 
 		// 切走画布/应用 → 30 秒计时；回到画布 → 取消并刷新截图
 		this.registerEvent(
@@ -2421,7 +2453,7 @@ class NoAutoplayPlugin extends Plugin {
 		);
 
 		// 焦点轮询：webview 的 focus/blur 事件时灵时不灵，用 activeElement 双通道兜底
-		this.focusPoll = setInterval(() => this.pollFocus(), 500);
+		this.registerInterval(window.setInterval(() => this.pollFocus(), 500));
 
 		// 命令
 		this.addCommand({
@@ -2429,7 +2461,7 @@ class NoAutoplayPlugin extends Plugin {
 			name: '切换截图省内存模式',
 			callback: () => {
 				this.settings.screenshotMode = !this.settings.screenshotMode;
-				this.saveData(this.settings);
+				this.saveSettings();
 				if (this.settings.screenshotMode) {
 					// 不能只 sweep：现有卡片都标着 live，handle 会跳过它们。
 					// 需要强制把当前所有符合条件的 live 卡收成截图。
@@ -2511,33 +2543,17 @@ class NoAutoplayPlugin extends Plugin {
 				this.forEmbeds((el) => {
 					if (isTempEmbed(el)) return;
 					const cat = categorize(el);
-					if (el.tagName === 'IFRAME' && cat === 'excalidraw') {
-						this.restoreIframeContent(el);
-					} else {
-						const orig = el.dataset.noAutoplaySrc;
-						if (orig && orig !== 'about:blank' && isBlank(el)) {
-							try {
-								el.src = orig;
-							} catch (e) {
-								/* ignore */
-							}
-						}
-					}
-					el.dataset.noAutoplayScreenshot = 'live';
-					el.dataset.noAutoplayLocked = '0';
-					if (el.tagName === 'WEBVIEW') {
-						this.applyMuteState(el, cat);
-						this.applyBackgroundFix(el);
-					}
-					const target = this.settings.screenshotMode && this.settings.screenshotScope[cat] && isScreenshotTargetEl(el, cat);
+					// 保留容器上的激活继承标记：截图模式仍开着，重建元素应继续继承 live
+					this.restoreOne(el, cat, false);
+					const target =
+						this.settings.screenshotMode &&
+						this.settings.screenshotScope[cat] &&
+						isScreenshotTargetEl(el, cat);
 					if (target) {
 						// 恢复到 live 后要加入 liveCards，自动计时/按钮才会继续生效
 						this.liveCards.add(el);
 						this.lastActiveWv = el;
-						this.removeCardButtons(el);
 						this.addCardButtons(el);
-					} else {
-						this.removeCardButtons(el);
 					}
 				});
 			},
@@ -2615,6 +2631,47 @@ class NoAutoplayPlugin extends Plugin {
 		}
 	}
 
+	/** 恢复单张卡片为真网页：还原被清空的地址/内容、复活被杀的渲染进程、
+	 *  重置状态标记并清掉卡片按钮（恢复所有/关闭模式/取消范围共用）。
+	 *  clearMarkers=false 时保留容器上的"激活继承"标记（"恢复所有"命令需要沿用，
+	 *  截图模式仍开着时重建元素应继续继承 live）。 */
+	restoreOne(el, cat, clearMarkers = true) {
+		if (el.tagName === 'IFRAME' && cat === 'excalidraw') {
+			// 关键：srcdoc 被清空的占位 iframe 不能只改状态，必须从快照恢复内容
+			this.restoreIframeContent(el);
+		} else {
+			const orig = el.dataset.noAutoplaySrc;
+			if (el.dataset.noAutoplayCrashed === '1') {
+				delete el.dataset.noAutoplayCrashed;
+				try {
+					el.reload();
+				} catch (e) {
+					try {
+						if (typeof el.loadURL === 'function') el.loadURL(orig);
+						else el.src = orig;
+					} catch (e2) {
+						/* ignore */
+					}
+				}
+			} else if (orig && orig !== 'about:blank' && isBlank(el)) {
+				try {
+					el.src = orig;
+				} catch (e) {
+					/* ignore */
+				}
+			}
+		}
+		el.dataset.noAutoplayScreenshot = 'live';
+		el.dataset.noAutoplayLocked = '0';
+		if (clearMarkers) this.clearActivationMarkers(el);
+		this.removeCardButtons(el);
+		// 重建/恢复的 webview 需要立即应用静音和背景修复，避免等到下一次 sweep
+		if (el.tagName === 'WEBVIEW') {
+			this.applyMuteState(el, cat);
+			this.applyBackgroundFix(el);
+		}
+	}
+
 	/** 关闭截图模式时：恢复所有被置空/被杀进程/被移除的网页 */
 	restoreAllBlanked() {
 		// 重建被移除的元素
@@ -2630,41 +2687,7 @@ class NoAutoplayPlugin extends Plugin {
 
 		this.forEmbeds((el) => {
 			if (isTempEmbed(el)) return;
-			const cat = categorize(el);
-			if (el.tagName === 'IFRAME' && cat === 'excalidraw') {
-				// 关键：srcdoc 被清空的占位 iframe 不能只改状态，必须从快照恢复内容
-				this.restoreIframeContent(el);
-			} else {
-				const orig = el.dataset.noAutoplaySrc;
-				if (el.dataset.noAutoplayCrashed === '1') {
-					delete el.dataset.noAutoplayCrashed;
-					try {
-						el.reload();
-					} catch (e) {
-						try {
-							if (typeof el.loadURL === 'function') el.loadURL(orig);
-							else el.src = orig;
-						} catch (e2) {
-							/* ignore */
-						}
-					}
-				} else if (orig && orig !== 'about:blank' && isBlank(el)) {
-					try {
-						el.src = orig;
-					} catch (e) {
-						/* ignore */
-					}
-				}
-			}
-			el.dataset.noAutoplayScreenshot = 'live';
-			el.dataset.noAutoplayLocked = '0';
-			this.clearActivationMarkers(el);
-			this.removeCardButtons(el);
-			// 重建/恢复的 webview 需要立即应用静音和背景修复，避免等到下一次 sweep
-			if (el.tagName === 'WEBVIEW') {
-				this.applyMuteState(el, cat);
-				this.applyBackgroundFix(el);
-			}
+			this.restoreOne(el, categorize(el));
 		});
 		this.liveCards.clear();
 		this.cancelTimers();
@@ -2685,38 +2708,7 @@ class NoAutoplayPlugin extends Plugin {
 		this.forEmbeds((el) => {
 			if (isTempEmbed(el)) return;
 			if (categorize(el) !== cat) return;
-			if (el.tagName === 'IFRAME' && cat === 'excalidraw') {
-				this.restoreIframeContent(el);
-			} else {
-				const orig = el.dataset.noAutoplaySrc;
-				if (el.dataset.noAutoplayCrashed === '1') {
-					delete el.dataset.noAutoplayCrashed;
-					try {
-						el.reload();
-					} catch (e) {
-						try {
-							if (typeof el.loadURL === 'function') el.loadURL(orig);
-							else el.src = orig;
-						} catch (e2) {
-							/* ignore */
-						}
-					}
-				} else if (orig && orig !== 'about:blank' && isBlank(el)) {
-					try {
-						el.src = orig;
-					} catch (e) {
-						/* ignore */
-					}
-				}
-			}
-			el.dataset.noAutoplayScreenshot = 'live';
-			el.dataset.noAutoplayLocked = '0';
-			this.clearActivationMarkers(el);
-			this.removeCardButtons(el);
-			if (el.tagName === 'WEBVIEW') {
-				this.applyMuteState(el, cat);
-				this.applyBackgroundFix(el);
-			}
+			this.restoreOne(el, cat);
 			this.liveCards.delete(el);
 		});
 	}
@@ -2748,10 +2740,13 @@ class NoAutoplayPlugin extends Plugin {
 			}
 		}
 		this.winObservers.clear();
-		if (this.timer) clearInterval(this.timer);
-		if (this.cacheCleanupTimer) clearInterval(this.cacheCleanupTimer);
-		if (this.focusPoll) clearInterval(this.focusPoll);
 		if (this.cleanupSoonTimer) clearTimeout(this.cleanupSoonTimer);
+		// 设置写盘防抖未落盘就卸载：尽力 flush 一次
+		if (this.saveTimer) {
+			clearTimeout(this.saveTimer);
+			this.saveTimer = null;
+			this.saveData(this.settings).catch(() => {});
+		}
 		// 唤醒所有排队等待抓图槽的任务：它们会看到已卸载并直接放弃，不再孵化新进程
 		this.tempCaptureQueue.splice(0).forEach((wake) => wake());
 		this.tempCaptureSlots = 0;
@@ -2891,7 +2886,7 @@ class NoAutoplaySettingsTab extends PluginSettingTab {
 			.addToggle((t) =>
 				t.setValue(this.plugin.settings.screenshotMode).onChange(async (v) => {
 					this.plugin.settings.screenshotMode = v;
-					await this.plugin.saveData(this.plugin.settings);
+					this.plugin.saveSettings();
 					if (v) this.plugin.suspendEligibleNow();
 					else this.plugin.restoreAllBlanked();
 				})
@@ -2901,13 +2896,13 @@ class NoAutoplaySettingsTab extends PluginSettingTab {
 		containerEl.createDiv({ cls: 'nap-group-header', text: '截图范围' });
 		this.addToggleRow(containerEl, '画布网页卡片', this.plugin.settings.screenshotScope.canvas, async (v) => {
 			this.plugin.settings.screenshotScope.canvas = v;
-			await this.plugin.saveData(this.plugin.settings);
+			this.plugin.saveSettings();
 			if (!v) this.plugin.restoreCategory('canvas');
 			else this.plugin.suspendEligibleNow();
 		});
 		this.addToggleRow(containerEl, 'Excalidraw 嵌入网页', this.plugin.settings.screenshotScope.excalidraw, async (v) => {
 			this.plugin.settings.screenshotScope.excalidraw = v;
-			await this.plugin.saveData(this.plugin.settings);
+			this.plugin.saveSettings();
 			if (!v) this.plugin.restoreCategory('excalidraw');
 			else this.plugin.suspendEligibleNow();
 		});
@@ -2916,17 +2911,17 @@ class NoAutoplaySettingsTab extends PluginSettingTab {
 		containerEl.createDiv({ cls: 'nap-group-header', text: '静音' });
 		this.addToggleRow(containerEl, '画布网页卡片', this.plugin.settings.muteScope.canvas, async (v) => {
 			this.plugin.settings.muteScope.canvas = v;
-			await this.plugin.saveData(this.plugin.settings);
+			this.plugin.saveSettings();
 			this.plugin.applyMuteCategory('canvas');
 		});
 		this.addToggleRow(containerEl, 'Excalidraw 嵌入网页', this.plugin.settings.muteScope.excalidraw, async (v) => {
 			this.plugin.settings.muteScope.excalidraw = v;
-			await this.plugin.saveData(this.plugin.settings);
+			this.plugin.saveSettings();
 			this.plugin.applyMuteCategory('excalidraw');
 		});
 		this.addToggleRow(containerEl, '网页浏览器标签页', this.plugin.settings.muteScope.webviewer, async (v) => {
 			this.plugin.settings.muteScope.webviewer = v;
-			await this.plugin.saveData(this.plugin.settings);
+			this.plugin.saveSettings();
 			this.plugin.applyMuteCategory('webviewer');
 		});
 		new Setting(containerEl)
@@ -2935,7 +2930,7 @@ class NoAutoplaySettingsTab extends PluginSettingTab {
 			.addToggle((t) =>
 				t.setValue(this.plugin.settings.defaultMute).onChange(async (v) => {
 					this.plugin.settings.defaultMute = v;
-					await this.plugin.saveData(this.plugin.settings);
+					this.plugin.saveSettings();
 					this.plugin.applyMuteCategory('canvas');
 					this.plugin.applyMuteCategory('excalidraw');
 					this.plugin.applyMuteCategory('webviewer');
@@ -2950,7 +2945,7 @@ class NoAutoplaySettingsTab extends PluginSettingTab {
 			.addToggle((t) =>
 				t.setValue(this.plugin.settings.fixTransparentBackground).onChange(async (v) => {
 					this.plugin.settings.fixTransparentBackground = v;
-					await this.plugin.saveData(this.plugin.settings);
+					this.plugin.saveSettings();
 					this.plugin.forEmbeds((el) => {
 						if (isTempEmbed(el)) return;
 						if (el.tagName === 'WEBVIEW') {
@@ -2971,7 +2966,7 @@ class NoAutoplaySettingsTab extends PluginSettingTab {
 					const n = parseInt(v, 10);
 					if (!isNaN(n) && n >= 10 && n <= 100) {
 						this.plugin.settings.screenshotQuality = n;
-						await this.plugin.saveData(this.plugin.settings);
+						this.plugin.saveSettings();
 					}
 				});
 			});
@@ -2985,7 +2980,7 @@ class NoAutoplaySettingsTab extends PluginSettingTab {
 					const n = parseInt(v, 10);
 					if (!isNaN(n) && n >= 0) {
 						this.plugin.settings.captureMinScreenPx = n;
-						await this.plugin.saveData(this.plugin.settings);
+						this.plugin.saveSettings();
 					}
 				});
 			});
@@ -2995,7 +2990,7 @@ class NoAutoplaySettingsTab extends PluginSettingTab {
 			.addToggle((t) =>
 				t.setValue(this.plugin.settings.killRendererOnSuspend).onChange(async (v) => {
 					this.plugin.settings.killRendererOnSuspend = v;
-					await this.plugin.saveData(this.plugin.settings);
+					this.plugin.saveSettings();
 				})
 			);
 
@@ -3017,7 +3012,7 @@ class NoAutoplaySettingsTab extends PluginSettingTab {
 					const n = parseInt(v, 10);
 					if (!isNaN(n) && n >= -1) {
 						this.plugin.settings.otherCardTimeoutMs = n < 0 ? -1 : n * 60000;
-						await this.plugin.saveData(this.plugin.settings);
+						this.plugin.saveSettings();
 					}
 				});
 			});
@@ -3037,7 +3032,7 @@ class NoAutoplaySettingsTab extends PluginSettingTab {
 					const n = parseInt(v, 10);
 					if (!isNaN(n) && n >= -1) {
 						this.plugin.settings.appBlurTimeoutMs = n < 0 ? -1 : n * 1000;
-						await this.plugin.saveData(this.plugin.settings);
+						this.plugin.saveSettings();
 					}
 				});
 			});
@@ -3054,7 +3049,7 @@ class NoAutoplaySettingsTab extends PluginSettingTab {
 					const n = parseInt(v, 10);
 					if (!isNaN(n) && n >= 9 && n <= 24) {
 						this.plugin.settings.buttonFontSizePx = n;
-						await this.plugin.saveData(this.plugin.settings);
+						this.plugin.saveSettings();
 						this.plugin.sizeObservers.forEach((ro, wv) => {
 							if (wv.isConnected) this.plugin.applySize(wv);
 						});
@@ -3082,7 +3077,7 @@ class NoAutoplaySettingsTab extends PluginSettingTab {
 					const n = parseInt(v, 10);
 					if (!isNaN(n) && n >= 0) {
 						this.plugin.settings.cacheSizeLimitMB = n;
-						await this.plugin.saveData(this.plugin.settings);
+						this.plugin.saveSettings();
 					}
 				});
 			});
