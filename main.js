@@ -636,6 +636,149 @@ function injectStyles(doc = document) {
   (doc.head || doc.documentElement).appendChild(style);
 }
 
+// src/state.ts
+var TRANSITIONS = {
+  unknown: ["screenshot", "live"],
+  screenshot: ["live"],
+  live: ["screenshot"]
+};
+function createCardState() {
+  return {
+    phase: "unknown",
+    src: "",
+    locked: false,
+    muted: null,
+    crashed: false,
+    focused: false,
+    temp: false,
+    refreshing: false,
+    generation: 0,
+    hooked: { mute: false, bgFix: false, focus: false },
+    muteApplied: null,
+    bgFixApplied: false,
+    sizeLast: "",
+    cleanups: []
+  };
+}
+function createContainerState() {
+  return { activatedSrc: "", activatedAt: 0, locked: false, muted: null };
+}
+var CardStore = class {
+  constructor() {
+    this.cards = /* @__PURE__ */ new WeakMap();
+    this.containers = /* @__PURE__ */ new WeakMap();
+  }
+  /** 取卡片状态，不存在则创建 */
+  get(el) {
+    let s = this.cards.get(el);
+    if (!s) {
+      s = createCardState();
+      this.cards.set(el, s);
+    }
+    return s;
+  }
+  /** 只读探查：不创建条目。用于"这个元素我们管过吗"这类判断 */
+  peek(el) {
+    return this.cards.get(el);
+  }
+  has(el) {
+    return this.cards.has(el);
+  }
+  /** 丢弃卡片状态（先跑完 cleanups，避免监听器泄漏） */
+  drop(el) {
+    const s = this.cards.get(el);
+    if (s)
+      this.runCleanups(s);
+    this.cards.delete(el);
+  }
+  /**
+   * 尝试迁移阶段。返回是否发生了迁移。
+   * 非法迁移（含"迁移到自身"）返回 false 且不改动状态——调用方应据此提前返回，
+   * 这正是原先散落各处的重复挂起/重复激活守卫的统一替代。
+   */
+  transition(el, next) {
+    const s = this.get(el);
+    if (!TRANSITIONS[s.phase].includes(next))
+      return false;
+    s.phase = next;
+    return true;
+  }
+  /** 阶段判定的语义化快捷方式 */
+  phase(el) {
+    return this.get(el).phase;
+  }
+  isLive(el) {
+    return this.get(el).phase === "live";
+  }
+  isSuspended(el) {
+    return this.get(el).phase === "screenshot";
+  }
+  /** 内容代数 +1 并返回新值；异步抓图用它判断结果是否已过期 */
+  bumpGeneration(el) {
+    const s = this.get(el);
+    s.generation += 1;
+    return s.generation;
+  }
+  isCurrentGeneration(el, generation) {
+    if (generation === void 0)
+      return true;
+    return this.get(el).generation === generation;
+  }
+  /** 登记一个注销函数，挂起/销毁时统一执行 */
+  addCleanup(el, fn) {
+    this.get(el).cleanups.push(fn);
+  }
+  /** 执行并清空该元素的全部注销函数 */
+  runCleanups(elOrState) {
+    const s = elOrState.cleanups ? elOrState : this.cards.get(elOrState);
+    if (!s)
+      return;
+    const list = s.cleanups;
+    s.cleanups = [];
+    for (const fn of list) {
+      try {
+        fn();
+      } catch (e) {
+      }
+    }
+  }
+  /* ---------------- 容器级（跨元素重建继承） ---------------- */
+  container(node) {
+    let s = this.containers.get(node);
+    if (!s) {
+      s = createContainerState();
+      this.containers.set(node, s);
+    }
+    return s;
+  }
+  peekContainer(node) {
+    return this.containers.get(node);
+  }
+  /** 记录"这张卡处于打开状态"，供元素重建时继承 */
+  markActivated(node, src, locked, muted) {
+    const s = this.container(node);
+    s.activatedSrc = src;
+    s.activatedAt = Date.now();
+    s.locked = locked;
+    s.muted = muted;
+  }
+  /** 清除激活标记（挂起、关闭截图模式时调用） */
+  clearActivated(node) {
+    const s = this.containers.get(node);
+    if (!s)
+      return;
+    s.activatedSrc = "";
+    s.activatedAt = 0;
+  }
+  /** 激活标记是否仍然有效（存在且未超过 ttlMs） */
+  isActivated(node, ttlMs) {
+    const s = this.containers.get(node);
+    if (!s || !s.activatedSrc)
+      return false;
+    return Date.now() - s.activatedAt < ttlMs;
+  }
+};
+
 // src/main.ts
 var LiteWebviewsPlugin = class extends import_obsidian2.Plugin {
   constructor() {
@@ -686,6 +829,8 @@ var LiteWebviewsPlugin = class extends import_obsidian2.Plugin {
     this.bgHandlers = /* @__PURE__ */ new WeakMap();
     // wv -> 背景修复监听器（卸载时移除）
     this._unloaded = false;
+    /** 卡片状态唯一真相源。DOM 只负责渲染，不再承载状态（详见 state.ts 顶部注释） */
+    this.store = new CardStore();
     this.settings = { ...DEFAULT_SETTINGS };
   }
   /* ---------------- 工具 ---------------- */
@@ -1138,9 +1283,10 @@ var LiteWebviewsPlugin = class extends import_obsidian2.Plugin {
     const overlay = parent.querySelector(".no-autoplay-placeholder");
     if (!overlay)
       return;
-    if (wv.dataset.napRefreshing === "1")
+    const st = this.store.get(wv);
+    if (st.refreshing)
       return;
-    wv.dataset.napRefreshing = "1";
+    st.refreshing = true;
     const status = this.showStatus(parent, "\u5237\u65B0\u622A\u56FE\u4E2D\u2026");
     try {
       const isIframe = wv.tagName === "IFRAME";
@@ -1179,7 +1325,7 @@ var LiteWebviewsPlugin = class extends import_obsidian2.Plugin {
       await this.refreshPlaceholderImage(wv, key, void 0);
       new import_obsidian2.Notice("Lite Webviews\uFF1A\u622A\u56FE\u5DF2\u5237\u65B0");
     } finally {
-      delete wv.dataset.napRefreshing;
+      st.refreshing = false;
       if (status && status.isConnected)
         status.remove();
     }
@@ -1387,23 +1533,24 @@ var LiteWebviewsPlugin = class extends import_obsidian2.Plugin {
   /** 按当前设置把 webview 置为静音/非静音，并挂跳转补刀钩子 */
   applyMuteState(wv, cat) {
     const want = this.shouldMute(wv, cat);
-    if (wv.dataset.noAutoplayMuteApplied !== String(want)) {
+    const st = this.store.get(wv);
+    if (st.muteApplied !== want) {
       try {
         if (typeof wv.setAudioMuted === "function") {
           wv.setAudioMuted(want);
-          wv.dataset.noAutoplayMuteApplied = String(want);
+          st.muteApplied = want;
         }
       } catch (e) {
       }
     }
-    if (!wv.dataset.noAutoplayMuteHooked) {
-      wv.dataset.noAutoplayMuteHooked = "1";
+    if (!st.hooked.mute) {
+      st.hooked.mute = true;
       const reMute = () => {
         try {
           if (typeof wv.setAudioMuted === "function") {
             const want2 = this.shouldMute(wv, categorize(wv));
             wv.setAudioMuted(want2);
-            wv.dataset.noAutoplayMuteApplied = String(want2);
+            st.muteApplied = want2;
           }
         } catch (e) {
         }
@@ -1450,8 +1597,9 @@ var LiteWebviewsPlugin = class extends import_obsidian2.Plugin {
         }
         this.bgHandlers.delete(wv);
       }
-      delete wv.dataset.noAutoplayBgFixHooked;
-      delete wv.dataset.noAutoplayBgFixApplied;
+      const s = this.store.get(wv);
+      s.hooked.bgFix = false;
+      s.bgFixApplied = false;
       this.execInWebview(wv, BG_FIX_CLEANUP_JS);
     };
     if (!want) {
@@ -1475,8 +1623,7 @@ var LiteWebviewsPlugin = class extends import_obsidian2.Plugin {
         applyFix();
       }
     }
-    if (wv.dataset.noAutoplayBgFixApplied !== "1")
-      wv.dataset.noAutoplayBgFixApplied = "1";
+    this.store.get(wv).bgFixApplied = true;
   }
   /* ---------------- 按钮显隐 ---------------- */
   /** 按钮字号（屏幕像素）：固定值，9-24，默认 13 */
@@ -1504,9 +1651,10 @@ var LiteWebviewsPlugin = class extends import_obsidian2.Plugin {
       return;
     const px = Math.round(this.effectiveButtonSizePx() / scale * 100) / 100;
     const val = px + "px";
-    if (container.dataset.napSizeLast === val)
+    const cs = this.store.get(container);
+    if (cs.sizeLast === val)
       return;
-    container.dataset.napSizeLast = val;
+    cs.sizeLast = val;
     container.style.setProperty("--nap-size", val);
   }
   /** 测量卡片当前所处的画布缩放比例（rect 宽 ÷ CSS 宽）；卡片不可见/无尺寸时返回 0 */
@@ -2448,8 +2596,8 @@ var LiteWebviewsPlugin = class extends import_obsidian2.Plugin {
     } else if (this.settings.muteScope[cat]) {
       stripAutoplayPermission(el);
     }
-    if (el.tagName === "WEBVIEW" && !el.dataset.noAutoplayFocusHooked && this.onWebviewFocus) {
-      el.dataset.noAutoplayFocusHooked = "1";
+    if (el.tagName === "WEBVIEW" && !this.store.get(el).hooked.focus && this.onWebviewFocus) {
+      this.store.get(el).hooked.focus = true;
       el.addEventListener("focus", this.onWebviewFocus);
       el.addEventListener("blur", this.onWebviewBlur);
     }
@@ -3104,13 +3252,14 @@ var LiteWebviewsPlugin = class extends import_obsidian2.Plugin {
     this.forEmbeds((wv) => {
       if (wv.tagName !== "WEBVIEW")
         return;
-      if (wv.dataset.noAutoplayFocusHooked === "1" && this.onWebviewFocus) {
+      const st = this.store.peek(wv);
+      if (st && st.hooked.focus && this.onWebviewFocus) {
         try {
           wv.removeEventListener("focus", this.onWebviewFocus);
           wv.removeEventListener("blur", this.onWebviewBlur);
         } catch (e) {
         }
-        delete wv.dataset.noAutoplayFocusHooked;
+        st.hooked.focus = false;
       }
       const reMute = this.muteHandlers.get(wv);
       if (reMute) {
@@ -3122,7 +3271,8 @@ var LiteWebviewsPlugin = class extends import_obsidian2.Plugin {
         } catch (e) {
         }
         this.muteHandlers.delete(wv);
-        delete wv.dataset.noAutoplayMuteHooked;
+        if (st)
+          st.hooked.mute = false;
       }
       const bgFix = this.bgHandlers.get(wv);
       if (bgFix) {
@@ -3134,11 +3284,13 @@ var LiteWebviewsPlugin = class extends import_obsidian2.Plugin {
         }
         this.bgHandlers.delete(wv);
       }
-      if (wv.dataset.noAutoplayBgFixApplied === "1") {
+      if (st && st.bgFixApplied) {
         this.execInWebview(wv, BG_FIX_CLEANUP_JS);
       }
-      delete wv.dataset.noAutoplayBgFixHooked;
-      delete wv.dataset.noAutoplayBgFixApplied;
+      if (st) {
+        st.hooked.bgFix = false;
+        st.bgFixApplied = false;
+      }
     });
     for (const [, ro] of this.sizeObservers) {
       try {

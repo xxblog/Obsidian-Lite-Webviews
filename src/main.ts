@@ -36,6 +36,7 @@ import {
 import { DEFAULT_SETTINGS, LiteWebviewsSettingsTab } from './settings';
 import type { LiteWebviewsSettings } from './settings';
 import { injectStyles } from './styles';
+import { CardStore } from './state';
 
 /**
  * Lite Webviews · 网页卡片轻量化（版本号以 manifest.json 为准）
@@ -82,6 +83,8 @@ export default class LiteWebviewsPlugin extends Plugin {
 	muteHandlers = new WeakMap<any, any>(); // wv -> reMute 监听器（卸载时移除，避免插件重载后残留旧监听）
 	bgHandlers = new WeakMap<any, any>(); // wv -> 背景修复监听器（卸载时移除）
 	_unloaded = false;
+	/** 卡片状态唯一真相源。DOM 只负责渲染，不再承载状态（详见 state.ts 顶部注释） */
+	store = new CardStore();
 	settings: LiteWebviewsSettings = { ...DEFAULT_SETTINGS };
 	// 以下处理器在 onload 中定义（handle 首次扫描就会挂载）
 	onWebviewFocus: any;
@@ -551,8 +554,9 @@ export default class LiteWebviewsPlugin extends Plugin {
 		if (!parent || !parent.isConnected) return;
 		const overlay = parent.querySelector('.no-autoplay-placeholder');
 		if (!overlay) return; // 不在挂起状态
-		if (wv.dataset.napRefreshing === '1') return; // 已在刷新中
-		wv.dataset.napRefreshing = '1';
+		const st = this.store.get(wv);
+		if (st.refreshing) return; // 已在刷新中
+		st.refreshing = true;
 		const status = this.showStatus(parent, '刷新截图中…');
 		try {
 			const isIframe = wv.tagName === 'IFRAME';
@@ -592,7 +596,7 @@ export default class LiteWebviewsPlugin extends Plugin {
 			await this.refreshPlaceholderImage(wv, key, undefined);
 			new Notice('Lite Webviews：截图已刷新');
 		} finally {
-			delete wv.dataset.napRefreshing;
+			st.refreshing = false;
 			if (status && status.isConnected) status.remove();
 		}
 	}
@@ -816,18 +820,19 @@ export default class LiteWebviewsPlugin extends Plugin {
 	applyMuteState(wv, cat) {
 		const want = this.shouldMute(wv, cat);
 		// sweep 每轮会重入一次；状态没变就不重复调用 setAudioMuted，减少对音频播放的干扰
-		if (wv.dataset.noAutoplayMuteApplied !== String(want)) {
+		const st = this.store.get(wv);
+		if (st.muteApplied !== want) {
 			try {
 				if (typeof wv.setAudioMuted === 'function') {
 					wv.setAudioMuted(want);
-					wv.dataset.noAutoplayMuteApplied = String(want);
+					st.muteApplied = want;
 				}
 			} catch (e) {
 				/* ignore */
 			}
 		}
-		if (!wv.dataset.noAutoplayMuteHooked) {
-			wv.dataset.noAutoplayMuteHooked = '1';
+		if (!st.hooked.mute) {
+			st.hooked.mute = true;
 			const reMute = () => {
 				try {
 					if (typeof wv.setAudioMuted === 'function') {
@@ -835,7 +840,7 @@ export default class LiteWebviewsPlugin extends Plugin {
 						wv.setAudioMuted(want);
 						// 同步去重标记：applyMuteState 靠它判断状态是否变化；元素"先插入、
 						// 后归位"期间类别可能变过，不同步会让下一轮 sweep 多做一次冗余切换
-						wv.dataset.noAutoplayMuteApplied = String(want);
+						st.muteApplied = want;
 					}
 				} catch (e) {
 					/* ignore */
@@ -885,8 +890,9 @@ export default class LiteWebviewsPlugin extends Plugin {
 				}
 				this.bgHandlers.delete(wv);
 			}
-			delete wv.dataset.noAutoplayBgFixHooked;
-			delete wv.dataset.noAutoplayBgFixApplied;
+			const s = this.store.get(wv);
+			s.hooked.bgFix = false;
+			s.bgFixApplied = false;
 			this.execInWebview(wv, BG_FIX_CLEANUP_JS);
 		};
 		if (!want) {
@@ -915,7 +921,7 @@ export default class LiteWebviewsPlugin extends Plugin {
 				applyFix();
 			}
 		}
-		if (wv.dataset.noAutoplayBgFixApplied !== '1') wv.dataset.noAutoplayBgFixApplied = '1';
+		this.store.get(wv).bgFixApplied = true;
 	}
 
 	/* ---------------- 按钮显隐 ---------------- */
@@ -945,8 +951,9 @@ export default class LiteWebviewsPlugin extends Plugin {
 		const px = Math.round((this.effectiveButtonSizePx() / scale) * 100) / 100;
 		// 值没变就不写 style：500ms 一轮的轮询会反复调用，别让它制造无谓的样式失效
 		const val = px + 'px';
-		if (container.dataset.napSizeLast === val) return;
-		container.dataset.napSizeLast = val;
+		const cs = this.store.get(container);
+		if (cs.sizeLast === val) return;
+		cs.sizeLast = val;
 		container.style.setProperty('--nap-size', val);
 	}
 
@@ -1968,8 +1975,8 @@ export default class LiteWebviewsPlugin extends Plugin {
 			stripAutoplayPermission(el);
 		}
 
-		if (el.tagName === 'WEBVIEW' && !el.dataset.noAutoplayFocusHooked && this.onWebviewFocus) {
-			el.dataset.noAutoplayFocusHooked = '1';
+		if (el.tagName === 'WEBVIEW' && !this.store.get(el).hooked.focus && this.onWebviewFocus) {
+			this.store.get(el).hooked.focus = true;
 			el.addEventListener('focus', this.onWebviewFocus);
 			el.addEventListener('blur', this.onWebviewBlur);
 		}
@@ -2698,14 +2705,15 @@ export default class LiteWebviewsPlugin extends Plugin {
 		// 否则插件重载后旧监听仍残留，新实例又因标记已存在而不再挂载。
 		this.forEmbeds((wv) => {
 			if (wv.tagName !== 'WEBVIEW') return;
-			if (wv.dataset.noAutoplayFocusHooked === '1' && this.onWebviewFocus) {
+			const st = this.store.peek(wv); // peek：从未管过的元素不必凭空建状态
+			if (st && st.hooked.focus && this.onWebviewFocus) {
 				try {
 					wv.removeEventListener('focus', this.onWebviewFocus);
 					wv.removeEventListener('blur', this.onWebviewBlur);
 				} catch (e) {
 					/* ignore */
 				}
-				delete wv.dataset.noAutoplayFocusHooked;
+				st.hooked.focus = false;
 			}
 			const reMute = this.muteHandlers.get(wv);
 			if (reMute) {
@@ -2718,7 +2726,7 @@ export default class LiteWebviewsPlugin extends Plugin {
 					/* ignore */
 				}
 				this.muteHandlers.delete(wv);
-				delete wv.dataset.noAutoplayMuteHooked;
+				if (st) st.hooked.mute = false;
 			}
 			const bgFix = this.bgHandlers.get(wv);
 			if (bgFix) {
@@ -2731,11 +2739,13 @@ export default class LiteWebviewsPlugin extends Plugin {
 				}
 				this.bgHandlers.delete(wv);
 			}
-			if (wv.dataset.noAutoplayBgFixApplied === '1') {
+			if (st && st.bgFixApplied) {
 				this.execInWebview(wv, BG_FIX_CLEANUP_JS);
 			}
-			delete wv.dataset.noAutoplayBgFixHooked;
-			delete wv.dataset.noAutoplayBgFixApplied;
+			if (st) {
+				st.hooked.bgFix = false;
+				st.bgFixApplied = false;
+			}
 		});
 
 		for (const [, ro] of this.sizeObservers) {
