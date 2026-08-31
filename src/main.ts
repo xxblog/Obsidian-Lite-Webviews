@@ -1049,6 +1049,8 @@ export default class LiteWebviewsPlugin extends Plugin {
 	 *  同步记录并清空 srcdoc/src（立即停止加载/释放资源）→ 显示缓存截图/占位 →
 	 *  后台用临时 webview 补抓最新截图。srcdoc 晚赋值时由 handle 再次调用本方法。 */
 	async suspendIframe(wv) {
+		// 快照型 iframe 允许重入（Excalidraw 会"先插空元素、后补 srcdoc"，
+		// 内容到达时需要再挂起一次），故此处不经迁移表、直接置位
 		this.store.get(wv).phase = 'screenshot';
 		this.store.get(wv).locked = false;
 		this.liveCards.delete(wv);
@@ -1117,7 +1119,8 @@ export default class LiteWebviewsPlugin extends Plugin {
 			await this.suspendIframe(wv);
 			return;
 		}
-		this.store.get(wv).phase = 'screenshot';
+		// 迁移表即守卫：只有 unknown / live 能进入 screenshot，重复挂起会被拒绝
+		if (!this.store.transition(wv, 'screenshot')) return;
 		this.store.get(wv).locked = false;
 		this.liveCards.delete(wv);
 		this.removeCardButtons(wv);
@@ -1660,8 +1663,8 @@ export default class LiteWebviewsPlugin extends Plugin {
 				wv = this.createWebviewFromSnapshot(parent, stored);
 			}
 		}
-		if (this.store.isLive(wv)) return; // 已是真网页（重复触发兜底）
-		this.store.get(wv).phase = 'live';
+		// 迁移表即守卫：live → live 属非法迁移会被拒绝，等价于原先的"重复触发兜底"
+		if (!this.store.transition(wv, 'live')) return;
 		this.store.get(wv).locked = false;
 		this.liveCards.add(wv);
 		this.lastActiveWv = wv;

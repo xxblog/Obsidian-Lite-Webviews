@@ -169,7 +169,7 @@ export class LiteWebviewsSettingsTab extends PluginSettingTab {
 						if (el.tagName === 'WEBVIEW') {
 							this.plugin.applyBackgroundFix(el);
 						} else if (el.tagName === 'IFRAME' && categorize(el) === 'excalidraw') {
-							if (el.dataset.noAutoplayScreenshot !== 'screenshot') this.plugin.applyIframePlugins(el);
+							if (!this.plugin.store.isSuspended(el)) this.plugin.applyIframePlugins(el);
 						}
 					});
 				})

@@ -364,7 +364,7 @@ var LiteWebviewsSettingsTab = class extends import_obsidian.PluginSettingTab {
           if (el.tagName === "WEBVIEW") {
             this.plugin.applyBackgroundFix(el);
           } else if (el.tagName === "IFRAME" && categorize(el) === "excalidraw") {
-            if (el.dataset.noAutoplayScreenshot !== "screenshot")
+            if (!this.plugin.store.isSuspended(el))
               this.plugin.applyIframePlugins(el);
           }
         });
@@ -1797,7 +1797,8 @@ var LiteWebviewsPlugin = class extends import_obsidian2.Plugin {
       await this.suspendIframe(wv);
       return;
     }
-    this.store.get(wv).phase = "screenshot";
+    if (!this.store.transition(wv, "screenshot"))
+      return;
     this.store.get(wv).locked = false;
     this.liveCards.delete(wv);
     this.removeCardButtons(wv);
@@ -2303,9 +2304,8 @@ var LiteWebviewsPlugin = class extends import_obsidian2.Plugin {
         wv = this.createWebviewFromSnapshot(parent, stored);
       }
     }
-    if (this.store.isLive(wv))
+    if (!this.store.transition(wv, "live"))
       return;
-    this.store.get(wv).phase = "live";
     this.store.get(wv).locked = false;
     this.liveCards.add(wv);
     this.lastActiveWv = wv;
