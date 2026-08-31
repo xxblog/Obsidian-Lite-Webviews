@@ -567,7 +567,7 @@ export default class LiteWebviewsPlugin extends Plugin {
 				doc = (stored && stored.srcdoc) || null;
 				src = (stored && stored.src) || '';
 			} else {
-				src = wv.dataset.noAutoplaySrc || '';
+				src = this.store.get(wv).src;
 			}
 			if (!doc && !/^https?:/i.test(src || '')) {
 				new Notice('Lite Webviews：该卡片没有可后台加载的网页内容');
@@ -591,7 +591,7 @@ export default class LiteWebviewsPlugin extends Plugin {
 				new Notice('Lite Webviews：截图刷新失败（页面未完成加载）');
 				return;
 			}
-			const key = isIframe ? this.iframeKey(wv) : wv.dataset.noAutoplaySrc || '';
+			const key = isIframe ? this.iframeKey(wv) : this.store.get(wv).src;
 			await this.saveScreenshot(key, img);
 			await this.refreshPlaceholderImage(wv, key, undefined);
 			new Notice('Lite Webviews：截图已刷新');
@@ -612,7 +612,7 @@ export default class LiteWebviewsPlugin extends Plugin {
 			new Notice('Lite Webviews：快照型嵌入请先挂起，再刷新截图');
 			return;
 		}
-		const src = wv.dataset.noAutoplaySrc || '';
+		const src = this.store.get(wv).src;
 		if (!src) {
 			new Notice('Lite Webviews：该卡片没有可抓图的网页地址');
 			return;
@@ -636,7 +636,7 @@ export default class LiteWebviewsPlugin extends Plugin {
 
 	/** 复制挂起卡片的截图到系统剪贴板（经 ImageBitmap→canvas 转 PNG；blob 解码不会污染 canvas） */
 	async copyScreenshot(wv) {
-		const key = wv.tagName === 'IFRAME' ? this.iframeKey(wv) : wv.dataset.noAutoplaySrc || '';
+		const key = wv.tagName === 'IFRAME' ? this.iframeKey(wv) : this.store.get(wv).src;
 		const info = await this.existingCacheInfo(key);
 		if (!info) {
 			new Notice('Lite Webviews：该卡片还没有截图可复制');
@@ -691,7 +691,7 @@ export default class LiteWebviewsPlugin extends Plugin {
 					this.copyScreenshot(wv).catch(() => {});
 				})
 		);
-		const src = wv.tagName === 'IFRAME' ? '' : wv.dataset.noAutoplaySrc || '';
+		const src = wv.tagName === 'IFRAME' ? '' : this.store.get(wv).src;
 		if (/^https?:/i.test(src)) {
 			menu.addSeparator();
 			menu.addItem((item) =>
@@ -1134,12 +1134,12 @@ export default class LiteWebviewsPlugin extends Plugin {
 			delete node.dataset.noAutoplayLocked;
 		}
 
-		let src = wv.dataset.noAutoplaySrc || '';
+		let src = this.store.get(wv).src;
 		if (!src && !isBlank(wv)) {
 			// 极端兜底：元素没经过 handle 记录地址时，至少从当前 src 抢救一次
 			try {
 				src = wv.src || '';
-				if (src && src !== 'about:blank') wv.dataset.noAutoplaySrc = src;
+				if (src && src !== 'about:blank') this.store.get(wv).src = src;
 			} catch (e) {
 				/* ignore */
 			}
@@ -1159,7 +1159,7 @@ export default class LiteWebviewsPlugin extends Plugin {
 				wv._napParent = parent; // 移除后 parentElement 为 null，保存引用
 				this.removedElements.set(parent, {
 					attrs,
-					src: wv.dataset.noAutoplaySrc || '',
+					src: this.store.get(wv).src,
 					cat: categorize(wv),
 					muted: wv.dataset.noAutoplayMuted,
 					locked: wv.dataset.noAutoplayLocked,
@@ -1178,7 +1178,7 @@ export default class LiteWebviewsPlugin extends Plugin {
 					}
 				}
 			}
-			wv.dataset.noAutoplayCrashed = '1';
+			this.store.get(wv).crashed = true;
 			await this.showPlaceholder(wv, src);
 			return;
 		}
@@ -1223,7 +1223,7 @@ export default class LiteWebviewsPlugin extends Plugin {
 			await this.waitForLoadEvent(wv, fresh ? 800 : 1500); // 空白页加载极快，等它完成
 			const killed = this.killRenderer(wv);
 			if (killed) {
-				wv.dataset.noAutoplayCrashed = '1';
+				this.store.get(wv).crashed = true;
 				// 彻底卸载：把元素从 DOM 移除（进程不再出生，进入画布零卡顿）。
 				// 实验已验证：Excalidraw 不会重新插入、无报错。
 				const parent = wv.parentElement;
@@ -1231,17 +1231,17 @@ export default class LiteWebviewsPlugin extends Plugin {
 					wv._napParent = parent;
 					this.removedElements.set(parent, {
 						attrs: this.snapshotAttrs(wv),
-						src: wv.dataset.noAutoplaySrc || '',
+						src: this.store.get(wv).src,
 						cat: categorize(wv),
 						muted: wv.dataset.noAutoplayMuted,
 					});
 					this.safeRemoveWebview(wv);
 				}
 			} else {
-				delete wv.dataset.noAutoplayCrashed; // 已是空白页
+				this.store.get(wv).crashed = false; // 已是空白页
 			}
 		} else {
-			delete wv.dataset.noAutoplayCrashed;
+			this.store.get(wv).crashed = false;
 			try {
 				wv.src = 'about:blank';
 			} catch (e) {
@@ -1281,7 +1281,7 @@ export default class LiteWebviewsPlugin extends Plugin {
 		this.forEmbeds((wv) => {
 			if (wv.tagName !== 'WEBVIEW') return;
 			if (isTempEmbed(wv)) return;
-			if (wv.dataset.noAutoplayCrashed !== '1') return;
+			if (!this.store.get(wv).crashed) return;
 			let loading = false;
 			try {
 				loading = typeof wv.isLoading === 'function' && wv.isLoading();
@@ -1379,7 +1379,7 @@ export default class LiteWebviewsPlugin extends Plugin {
 		} catch (e) {
 			/* ignore */
 		}
-		el.dataset.noAutoplaySrc = stored.src || '';
+		this.store.get(el).src = stored.src || '';
 		el.dataset.noAutoplayScreenshot = 'screenshot'; // 交给 activate 流程接管状态
 		if (stored.muted !== undefined) el.dataset.noAutoplayMuted = stored.muted;
 		if (stored.locked !== undefined) el.dataset.noAutoplayLocked = stored.locked;
@@ -1442,7 +1442,7 @@ export default class LiteWebviewsPlugin extends Plugin {
 			if (this._unloaded) return; // 上面两个 await 合计最长约 6 秒，期间插件可能已卸载
 			if (!wv.isConnected) return;
 			if (wv.dataset.noAutoplayScreenshot !== 'live') return;
-			const src = wv.dataset.noAutoplaySrc;
+			const src = this.store.get(wv).src;
 			if (!src || isBlank(wv) || typeof wv.capturePage !== 'function') return;
 			if (!this.sizeOk(wv)) return; // 卡片太小不抓，与挂起时的抓图策略一致
 			const img = await wv.capturePage();
@@ -1670,7 +1670,7 @@ export default class LiteWebviewsPlugin extends Plugin {
 		this.applyMuteState(wv, categorize(wv));
 		this.applyBackgroundFix(wv);
 
-		const src = wv.dataset.noAutoplaySrc || '';
+		const src = this.store.get(wv).src;
 		// 在卡片容器上记录激活状态：画布/Excalidraw 重建 webview 元素时继承 live
 		const node = wv.closest('.canvas-node') || wv.parentElement;
 		if (node) {
@@ -1681,9 +1681,9 @@ export default class LiteWebviewsPlugin extends Plugin {
 				node.dataset.noAutoplayMuted = wv.dataset.noAutoplayMuted;
 			}
 		}
-		if (wv.dataset.noAutoplayCrashed === '1') {
+		if (this.store.get(wv).crashed) {
 			// 渲染进程被杀过：地址可能已被置空，先恢复地址；地址正确则 reload 复活
-			delete wv.dataset.noAutoplayCrashed;
+			this.store.get(wv).crashed = false;
 			if (src) {
 				try {
 					let cur = '';
@@ -1981,9 +1981,9 @@ export default class LiteWebviewsPlugin extends Plugin {
 			el.addEventListener('focus', this.onWebviewFocus);
 			el.addEventListener('blur', this.onWebviewBlur);
 		}
-		if (!el.dataset.noAutoplaySrc) {
+		if (!this.store.get(el).src) {
 			try {
-				el.dataset.noAutoplaySrc = el.src || '';
+				this.store.get(el).src = el.src || '';
 			} catch (e) {
 				/* ignore */
 			}
@@ -2433,9 +2433,9 @@ export default class LiteWebviewsPlugin extends Plugin {
 					// 只停止真正的网页（http/data 来源）。画布中的 PDF 等文件卡片同样
 					// 由 iframe 渲染（src 为 app:// 本地地址），清空它们只会让卡片白屏
 					if (!isWebSrc(el)) return;
-					if (!el.dataset.noAutoplaySrc) {
+					if (!this.store.get(el).src) {
 						try {
-							el.dataset.noAutoplaySrc = el.src || '';
+							this.store.get(el).src = el.src || '';
 						} catch (e) {
 							/* ignore */
 						}
@@ -2586,9 +2586,9 @@ export default class LiteWebviewsPlugin extends Plugin {
 			// 关键：srcdoc 被清空的占位 iframe 不能只改状态，必须从快照恢复内容
 			this.restoreIframeContent(el);
 		} else {
-			const orig = el.dataset.noAutoplaySrc;
-			if (el.dataset.noAutoplayCrashed === '1') {
-				delete el.dataset.noAutoplayCrashed;
+			const orig = this.store.get(el).src;
+			if (this.store.get(el).crashed) {
+				this.store.get(el).crashed = false;
 				try {
 					el.reload();
 				} catch (e) {

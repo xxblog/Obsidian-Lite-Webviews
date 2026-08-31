@@ -1297,7 +1297,7 @@ var LiteWebviewsPlugin = class extends import_obsidian2.Plugin {
         doc = stored && stored.srcdoc || null;
         src = stored && stored.src || "";
       } else {
-        src = wv.dataset.noAutoplaySrc || "";
+        src = this.store.get(wv).src;
       }
       if (!doc && !/^https?:/i.test(src || "")) {
         new import_obsidian2.Notice("Lite Webviews\uFF1A\u8BE5\u5361\u7247\u6CA1\u6709\u53EF\u540E\u53F0\u52A0\u8F7D\u7684\u7F51\u9875\u5185\u5BB9");
@@ -1320,7 +1320,7 @@ var LiteWebviewsPlugin = class extends import_obsidian2.Plugin {
         new import_obsidian2.Notice("Lite Webviews\uFF1A\u622A\u56FE\u5237\u65B0\u5931\u8D25\uFF08\u9875\u9762\u672A\u5B8C\u6210\u52A0\u8F7D\uFF09");
         return;
       }
-      const key = isIframe ? this.iframeKey(wv) : wv.dataset.noAutoplaySrc || "";
+      const key = isIframe ? this.iframeKey(wv) : this.store.get(wv).src;
       await this.saveScreenshot(key, img);
       await this.refreshPlaceholderImage(wv, key, void 0);
       new import_obsidian2.Notice("Lite Webviews\uFF1A\u622A\u56FE\u5DF2\u5237\u65B0");
@@ -1341,7 +1341,7 @@ var LiteWebviewsPlugin = class extends import_obsidian2.Plugin {
       new import_obsidian2.Notice("Lite Webviews\uFF1A\u5FEB\u7167\u578B\u5D4C\u5165\u8BF7\u5148\u6302\u8D77\uFF0C\u518D\u5237\u65B0\u622A\u56FE");
       return;
     }
-    const src = wv.dataset.noAutoplaySrc || "";
+    const src = this.store.get(wv).src;
     if (!src) {
       new import_obsidian2.Notice("Lite Webviews\uFF1A\u8BE5\u5361\u7247\u6CA1\u6709\u53EF\u6293\u56FE\u7684\u7F51\u9875\u5730\u5740");
       return;
@@ -1364,7 +1364,7 @@ var LiteWebviewsPlugin = class extends import_obsidian2.Plugin {
   }
   /** 复制挂起卡片的截图到系统剪贴板（经 ImageBitmap→canvas 转 PNG；blob 解码不会污染 canvas） */
   async copyScreenshot(wv) {
-    const key = wv.tagName === "IFRAME" ? this.iframeKey(wv) : wv.dataset.noAutoplaySrc || "";
+    const key = wv.tagName === "IFRAME" ? this.iframeKey(wv) : this.store.get(wv).src;
     const info = await this.existingCacheInfo(key);
     if (!info) {
       new import_obsidian2.Notice("Lite Webviews\uFF1A\u8BE5\u5361\u7247\u8FD8\u6CA1\u6709\u622A\u56FE\u53EF\u590D\u5236");
@@ -1413,7 +1413,7 @@ var LiteWebviewsPlugin = class extends import_obsidian2.Plugin {
         });
       })
     );
-    const src = wv.tagName === "IFRAME" ? "" : wv.dataset.noAutoplaySrc || "";
+    const src = wv.tagName === "IFRAME" ? "" : this.store.get(wv).src;
     if (/^https?:/i.test(src)) {
       menu.addSeparator();
       menu.addItem(
@@ -1813,12 +1813,12 @@ var LiteWebviewsPlugin = class extends import_obsidian2.Plugin {
       delete node.dataset.noAutoplayActivatedUntil;
       delete node.dataset.noAutoplayLocked;
     }
-    let src = wv.dataset.noAutoplaySrc || "";
+    let src = this.store.get(wv).src;
     if (!src && !isBlank(wv)) {
       try {
         src = wv.src || "";
         if (src && src !== "about:blank")
-          wv.dataset.noAutoplaySrc = src;
+          this.store.get(wv).src = src;
       } catch (e) {
       }
     }
@@ -1834,7 +1834,7 @@ var LiteWebviewsPlugin = class extends import_obsidian2.Plugin {
         wv._napParent = parent;
         this.removedElements.set(parent, {
           attrs,
-          src: wv.dataset.noAutoplaySrc || "",
+          src: this.store.get(wv).src,
           cat: categorize(wv),
           muted: wv.dataset.noAutoplayMuted,
           locked: wv.dataset.noAutoplayLocked
@@ -1849,7 +1849,7 @@ var LiteWebviewsPlugin = class extends import_obsidian2.Plugin {
           }
         }
       }
-      wv.dataset.noAutoplayCrashed = "1";
+      this.store.get(wv).crashed = true;
       await this.showPlaceholder(wv, src);
       return;
     }
@@ -1888,23 +1888,23 @@ var LiteWebviewsPlugin = class extends import_obsidian2.Plugin {
       await this.waitForLoadEvent(wv, fresh ? 800 : 1500);
       const killed = this.killRenderer(wv);
       if (killed) {
-        wv.dataset.noAutoplayCrashed = "1";
+        this.store.get(wv).crashed = true;
         const parent = wv.parentElement;
         if (parent) {
           wv._napParent = parent;
           this.removedElements.set(parent, {
             attrs: this.snapshotAttrs(wv),
-            src: wv.dataset.noAutoplaySrc || "",
+            src: this.store.get(wv).src,
             cat: categorize(wv),
             muted: wv.dataset.noAutoplayMuted
           });
           this.safeRemoveWebview(wv);
         }
       } else {
-        delete wv.dataset.noAutoplayCrashed;
+        this.store.get(wv).crashed = false;
       }
     } else {
-      delete wv.dataset.noAutoplayCrashed;
+      this.store.get(wv).crashed = false;
       try {
         wv.src = "about:blank";
       } catch (e) {
@@ -1944,7 +1944,7 @@ var LiteWebviewsPlugin = class extends import_obsidian2.Plugin {
         return;
       if (isTempEmbed(wv))
         return;
-      if (wv.dataset.noAutoplayCrashed !== "1")
+      if (!this.store.get(wv).crashed)
         return;
       let loading = false;
       try {
@@ -2043,7 +2043,7 @@ var LiteWebviewsPlugin = class extends import_obsidian2.Plugin {
       el.setAttribute("src", stored.src || "about:blank");
     } catch (e) {
     }
-    el.dataset.noAutoplaySrc = stored.src || "";
+    this.store.get(el).src = stored.src || "";
     el.dataset.noAutoplayScreenshot = "screenshot";
     if (stored.muted !== void 0)
       el.dataset.noAutoplayMuted = stored.muted;
@@ -2104,7 +2104,7 @@ var LiteWebviewsPlugin = class extends import_obsidian2.Plugin {
         return;
       if (wv.dataset.noAutoplayScreenshot !== "live")
         return;
-      const src = wv.dataset.noAutoplaySrc;
+      const src = this.store.get(wv).src;
       if (!src || isBlank(wv) || typeof wv.capturePage !== "function")
         return;
       if (!this.sizeOk(wv))
@@ -2317,7 +2317,7 @@ var LiteWebviewsPlugin = class extends import_obsidian2.Plugin {
     this.removeCardButtons(wv);
     this.applyMuteState(wv, categorize(wv));
     this.applyBackgroundFix(wv);
-    const src = wv.dataset.noAutoplaySrc || "";
+    const src = this.store.get(wv).src;
     const node = wv.closest(".canvas-node") || wv.parentElement;
     if (node) {
       node.dataset.noAutoplayActivatedSrc = src;
@@ -2327,8 +2327,8 @@ var LiteWebviewsPlugin = class extends import_obsidian2.Plugin {
         node.dataset.noAutoplayMuted = wv.dataset.noAutoplayMuted;
       }
     }
-    if (wv.dataset.noAutoplayCrashed === "1") {
-      delete wv.dataset.noAutoplayCrashed;
+    if (this.store.get(wv).crashed) {
+      this.store.get(wv).crashed = false;
       if (src) {
         try {
           let cur = "";
@@ -2602,9 +2602,9 @@ var LiteWebviewsPlugin = class extends import_obsidian2.Plugin {
       el.addEventListener("focus", this.onWebviewFocus);
       el.addEventListener("blur", this.onWebviewBlur);
     }
-    if (!el.dataset.noAutoplaySrc) {
+    if (!this.store.get(el).src) {
       try {
-        el.dataset.noAutoplaySrc = el.src || "";
+        this.store.get(el).src = el.src || "";
       } catch (e) {
       }
     }
@@ -2988,9 +2988,9 @@ var LiteWebviewsPlugin = class extends import_obsidian2.Plugin {
           }
           if (!isWebSrc(el))
             return;
-          if (!el.dataset.noAutoplaySrc) {
+          if (!this.store.get(el).src) {
             try {
-              el.dataset.noAutoplaySrc = el.src || "";
+              this.store.get(el).src = el.src || "";
             } catch (e) {
             }
           }
@@ -3138,9 +3138,9 @@ var LiteWebviewsPlugin = class extends import_obsidian2.Plugin {
     if (el.tagName === "IFRAME" && cat === "excalidraw") {
       this.restoreIframeContent(el);
     } else {
-      const orig = el.dataset.noAutoplaySrc;
-      if (el.dataset.noAutoplayCrashed === "1") {
-        delete el.dataset.noAutoplayCrashed;
+      const orig = this.store.get(el).src;
+      if (this.store.get(el).crashed) {
+        this.store.get(el).crashed = false;
         try {
           el.reload();
         } catch (e) {
