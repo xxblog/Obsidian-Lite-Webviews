@@ -533,14 +533,14 @@ export default class LiteWebviewsPlugin extends Plugin {
 			}
 			return;
 		}
-		if (iframe.dataset.noAutoplayScreenshot !== 'screenshot') return; // 已重新激活，旧抓图不再写缓存
+		if (!this.store.isSuspended(iframe)) return; // 已重新激活，旧抓图不再写缓存
 		const parent = this.napParent(iframe);
 		if (!parent || !parent.isConnected) return;
 		if (!this.sizeOk(iframe)) return;
 		if (generation !== undefined && this.iframeGenerations.get(iframe) !== generation) return;
 		const cacheKey = key || 'iframe:' + hashUrl(doc || src || '');
 		const isStale = () =>
-			iframe.dataset.noAutoplayScreenshot !== 'screenshot' ||
+			!this.store.isSuspended(iframe) ||
 			(generation !== undefined && this.iframeGenerations.get(iframe) !== generation);
 		const img = await this.captureWithTempWebview(doc, src, parent, isStale);
 		if (img) {
@@ -604,7 +604,7 @@ export default class LiteWebviewsPlugin extends Plugin {
 	/** 刷新"当前卡片"的截图（命令入口）：挂起卡走后台重抓（不加载真网页），
 	 *  live 卡直接抓当前画面；live 的 Excalidraw 快照型 iframe 无法直接抓图，提示先挂起 */
 	async refreshCurrentScreenshot(wv) {
-		if (wv.dataset.noAutoplayScreenshot === 'screenshot') {
+		if (this.store.isSuspended(wv)) {
 			await this.refreshScreenshot(wv);
 			return;
 		}
@@ -1049,15 +1049,14 @@ export default class LiteWebviewsPlugin extends Plugin {
 	 *  同步记录并清空 srcdoc/src（立即停止加载/释放资源）→ 显示缓存截图/占位 →
 	 *  后台用临时 webview 补抓最新截图。srcdoc 晚赋值时由 handle 再次调用本方法。 */
 	async suspendIframe(wv) {
-		wv.dataset.noAutoplayScreenshot = 'screenshot';
+		this.store.get(wv).phase = 'screenshot';
 		this.store.get(wv).locked = false;
 		this.liveCards.delete(wv);
 		this.removeCardButtons(wv);
 
 		const markNode = wv.closest('.canvas-node') || this.napParent(wv);
 		if (markNode) {
-			delete markNode.dataset.noAutoplayActivatedSrc;
-			delete markNode.dataset.noAutoplayActivatedUntil;
+			this.store.clearActivated(markNode);
 			this.store.container(markNode).locked = false;
 		}
 
@@ -1113,12 +1112,12 @@ export default class LiteWebviewsPlugin extends Plugin {
 	 *  立即同步置空中止加载，绝不先做抓图等耗时操作，避免页面趁机加载。
 	 */
 	async switchToScreenshot(wv, fresh = false) {
-		if (wv.dataset.noAutoplayScreenshot === 'screenshot') return;
+		if (this.store.isSuspended(wv)) return;
 		if (wv.tagName === 'IFRAME') {
 			await this.suspendIframe(wv);
 			return;
 		}
-		wv.dataset.noAutoplayScreenshot = 'screenshot';
+		this.store.get(wv).phase = 'screenshot';
 		this.store.get(wv).locked = false;
 		this.liveCards.delete(wv);
 		this.removeCardButtons(wv);
@@ -1130,8 +1129,7 @@ export default class LiteWebviewsPlugin extends Plugin {
 		// 清除容器上的激活标记（收起后重建元素不再继承 live）
 		const node = wv.closest('.canvas-node') || wv.parentElement;
 		if (node) {
-			delete node.dataset.noAutoplayActivatedSrc;
-			delete node.dataset.noAutoplayActivatedUntil;
+			this.store.clearActivated(node);
 			this.store.container(node).locked = false;
 		}
 
@@ -1381,7 +1379,7 @@ export default class LiteWebviewsPlugin extends Plugin {
 			/* ignore */
 		}
 		this.store.get(el).src = stored.src || '';
-		el.dataset.noAutoplayScreenshot = 'screenshot'; // 交给 activate 流程接管状态
+		this.store.get(el).phase = 'screenshot'; // 交给 activate 流程接管状态
 		this.store.get(el).muted = stored.muted ?? null;
 		this.store.get(el).locked = !!stored.locked;
 		// 先插回 DOM（src 属性会触发加载），插到占位层之前
@@ -1442,7 +1440,7 @@ export default class LiteWebviewsPlugin extends Plugin {
 			await new Promise((r) => setTimeout(r, LIVE_CAPTURE_SETTLE_MS)); // 静置等待 JS 渲染
 			if (this._unloaded) return; // 上面两个 await 合计最长约 6 秒，期间插件可能已卸载
 			if (!wv.isConnected) return;
-			if (wv.dataset.noAutoplayScreenshot !== 'live') return;
+			if (!this.store.isLive(wv)) return;
 			const src = this.store.get(wv).src;
 			if (!src || isBlank(wv) || typeof wv.capturePage !== 'function') return;
 			if (!this.sizeOk(wv)) return; // 卡片太小不抓，与挂起时的抓图策略一致
@@ -1635,7 +1633,7 @@ export default class LiteWebviewsPlugin extends Plugin {
 				}
 				this.applyIframePlugins(oldEl);
 			}
-			oldEl.dataset.noAutoplayScreenshot = 'live';
+			this.store.get(oldEl).phase = 'live';
 			this.store.get(oldEl).locked = false;
 			this.liveCards.add(oldEl);
 			this.lastActiveWv = oldEl;
@@ -1643,8 +1641,8 @@ export default class LiteWebviewsPlugin extends Plugin {
 			// 记录激活标记（重建元素时继承 live）
 			const markNode = oldEl.closest('.canvas-node') || parent;
 			if (markNode) {
-				markNode.dataset.noAutoplayActivatedSrc = 'iframe';
-				markNode.dataset.noAutoplayActivatedUntil = String(Date.now() + ACTIVATION_MARK_TTL_MS);
+				this.store.container(markNode).activatedSrc = 'iframe';
+				this.store.container(markNode).activatedAt = Date.now();
 				this.store.container(markNode).locked = false;
 			}
 			const status = this.showStatus(parent, '加载中…');
@@ -1662,8 +1660,8 @@ export default class LiteWebviewsPlugin extends Plugin {
 				wv = this.createWebviewFromSnapshot(parent, stored);
 			}
 		}
-		if (wv.dataset.noAutoplayScreenshot === 'live') return; // 已是真网页（重复触发兜底）
-		wv.dataset.noAutoplayScreenshot = 'live';
+		if (this.store.isLive(wv)) return; // 已是真网页（重复触发兜底）
+		this.store.get(wv).phase = 'live';
 		this.store.get(wv).locked = false;
 		this.liveCards.add(wv);
 		this.lastActiveWv = wv;
@@ -1675,8 +1673,8 @@ export default class LiteWebviewsPlugin extends Plugin {
 		// 在卡片容器上记录激活状态：画布/Excalidraw 重建 webview 元素时继承 live
 		const node = wv.closest('.canvas-node') || wv.parentElement;
 		if (node) {
-			node.dataset.noAutoplayActivatedSrc = src;
-			node.dataset.noAutoplayActivatedUntil = String(Date.now() + ACTIVATION_MARK_TTL_MS);
+			this.store.container(node).activatedSrc = src;
+			this.store.container(node).activatedAt = Date.now();
 			this.store.container(node).locked = false;
 			this.store.container(node).muted = this.store.get(wv).muted;
 		}
@@ -1952,14 +1950,14 @@ export default class LiteWebviewsPlugin extends Plugin {
 			screenshotEnabled &&
 			el.tagName === 'IFRAME' &&
 			cat === 'excalidraw' &&
-			el.dataset.noAutoplayScreenshot !== 'screenshot' &&
-			el.dataset.noAutoplayScreenshot !== 'live';
+			!this.store.isSuspended(el) &&
+			!this.store.isLive(el);
 
 		if (el.tagName === 'WEBVIEW') {
 			this.applyMuteState(el, cat);
 			this.applyBackgroundFix(el);
 		} else if (el.tagName === 'IFRAME' && cat === 'excalidraw') {
-			if (el.dataset.noAutoplayScreenshot === 'screenshot') {
+			if (this.store.isSuspended(el)) {
 				// 已挂起的占位卡：Excalidraw 可能"先插空 iframe、后补 srcdoc"。
 				// 内容一到就立即记录并再次清空，绝不长期留在 DOM 里占内存。
 				const lateDoc = el.getAttribute('srcdoc') || '';
@@ -1994,8 +1992,7 @@ export default class LiteWebviewsPlugin extends Plugin {
 			const node = el.closest('.canvas-node') || el.parentElement;
 			if (
 				node &&
-				node.dataset.noAutoplayActivatedSrc &&
-				Number(node.dataset.noAutoplayActivatedUntil || 0) > Date.now()
+				this.store.isActivated(node, ACTIVATION_MARK_TTL_MS)
 			) {
 				const isIframe = el.tagName === 'IFRAME';
 				let cur = '';
@@ -2005,9 +2002,9 @@ export default class LiteWebviewsPlugin extends Plugin {
 					/* ignore */
 				}
 				// webview 按地址匹配；iframe（快照卡）同容器即视为同一张
-				if (isIframe || cur === node.dataset.noAutoplayActivatedSrc) {
+				if (isIframe || cur === this.store.container(node).activatedSrc) {
 					const alreadyManaged = this.liveCards.has(el);
-					el.dataset.noAutoplayScreenshot = 'live';
+					this.store.get(el).phase = 'live';
 					this.store.get(el).locked = this.store.container(node).locked;
 					// null 表示"跟随全局默认"，直接继承即可，无需再区分"未设置"
 					this.store.get(el).muted = this.store.container(node).muted;
@@ -2030,7 +2027,7 @@ export default class LiteWebviewsPlugin extends Plugin {
 		// 静默失效。重新收养这类"无主 live 卡"（卸载时容器激活标记已清，继承分支接不到）。
 		if (
 			screenshotEnabled &&
-			el.dataset.noAutoplayScreenshot === 'live' &&
+			this.store.isLive(el) &&
 			!this.liveCards.has(el)
 		) {
 			this.liveCards.add(el);
@@ -2042,8 +2039,8 @@ export default class LiteWebviewsPlugin extends Plugin {
 		// 画布文本/文件卡片的内容是 iframe 渲染的，绝不能动。
 		if (
 			screenshotEnabled &&
-			el.dataset.noAutoplayScreenshot !== 'screenshot' &&
-			el.dataset.noAutoplayScreenshot !== 'live'
+			!this.store.isSuspended(el) &&
+			!this.store.isLive(el)
 		) {
 			await this.switchToScreenshot(el, true); // fresh：新元素，置空优先级最高
 		}
@@ -2405,7 +2402,7 @@ export default class LiteWebviewsPlugin extends Plugin {
 						this.settings.screenshotScope[cat] &&
 						isScreenshotTargetEl(el, cat)
 					) {
-						this.switchToScreenshot(el, el.dataset.noAutoplayScreenshot !== 'live').catch(
+						this.switchToScreenshot(el, !this.store.isLive(el)).catch(
 							() => {}
 						);
 						return;
@@ -2509,7 +2506,7 @@ export default class LiteWebviewsPlugin extends Plugin {
 					new Notice('Lite Webviews：当前没有可挂起的卡片');
 					return;
 				}
-				if (wv.dataset.noAutoplayScreenshot === 'screenshot') return; // 已是截图状态
+				if (this.store.isSuspended(wv)) return; // 已是截图状态
 				this.switchToScreenshot(wv).catch(() => {}); // 手动挂起对保活卡片也生效
 			},
 		});
@@ -2538,7 +2535,7 @@ export default class LiteWebviewsPlugin extends Plugin {
 			if (isTempEmbed(el)) return;
 			const cat = categorize(el);
 			if (!this.settings.screenshotScope[cat] || !isScreenshotTargetEl(el, cat)) return;
-			if (el.dataset.noAutoplayScreenshot === 'screenshot') return;
+			if (this.store.isSuspended(el)) return;
 			// 这些元素已经存在于 DOM，按"非 fresh"处理：已加载完就先补抓一张最新截图
 			this.switchToScreenshot(el, false).catch(() => {});
 		});
@@ -2567,8 +2564,7 @@ export default class LiteWebviewsPlugin extends Plugin {
 		try {
 			const node = el.closest('.canvas-node') || el.parentElement || this.napParent(el);
 			if (!node || !node.dataset) return;
-			delete node.dataset.noAutoplayActivatedSrc;
-			delete node.dataset.noAutoplayActivatedUntil;
+			this.store.clearActivated(node);
 			this.store.container(node).locked = false;
 		} catch (e) {
 			/* ignore */
@@ -2605,7 +2601,7 @@ export default class LiteWebviewsPlugin extends Plugin {
 				}
 			}
 		}
-		el.dataset.noAutoplayScreenshot = 'live';
+		this.store.get(el).phase = 'live';
 		this.store.get(el).locked = false;
 		if (clearMarkers) this.clearActivationMarkers(el);
 		this.removeCardButtons(el);
@@ -2667,7 +2663,7 @@ export default class LiteWebviewsPlugin extends Plugin {
 				this.applyBackgroundFix(el);
 			} else if (el.tagName === 'IFRAME' && cat === 'excalidraw') {
 				// 占位 iframe 的 srcdoc 已清空，注入没有意义；激活时会按当前设置处理
-				if (el.dataset.noAutoplayScreenshot === 'screenshot') return;
+				if (this.store.isSuspended(el)) return;
 				this.applyIframePlugins(el);
 			}
 		});

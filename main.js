@@ -1259,7 +1259,7 @@ var LiteWebviewsPlugin = class extends import_obsidian2.Plugin {
       }
       return;
     }
-    if (iframe.dataset.noAutoplayScreenshot !== "screenshot")
+    if (!this.store.isSuspended(iframe))
       return;
     const parent = this.napParent(iframe);
     if (!parent || !parent.isConnected)
@@ -1269,7 +1269,7 @@ var LiteWebviewsPlugin = class extends import_obsidian2.Plugin {
     if (generation !== void 0 && this.iframeGenerations.get(iframe) !== generation)
       return;
     const cacheKey = key || "iframe:" + hashUrl(doc || src || "");
-    const isStale = () => iframe.dataset.noAutoplayScreenshot !== "screenshot" || generation !== void 0 && this.iframeGenerations.get(iframe) !== generation;
+    const isStale = () => !this.store.isSuspended(iframe) || generation !== void 0 && this.iframeGenerations.get(iframe) !== generation;
     const img = await this.captureWithTempWebview(doc, src, parent, isStale);
     if (img) {
       await this.saveScreenshot(cacheKey, img);
@@ -1333,7 +1333,7 @@ var LiteWebviewsPlugin = class extends import_obsidian2.Plugin {
   /** 刷新"当前卡片"的截图（命令入口）：挂起卡走后台重抓（不加载真网页），
    *  live 卡直接抓当前画面；live 的 Excalidraw 快照型 iframe 无法直接抓图，提示先挂起 */
   async refreshCurrentScreenshot(wv) {
-    if (wv.dataset.noAutoplayScreenshot === "screenshot") {
+    if (this.store.isSuspended(wv)) {
       await this.refreshScreenshot(wv);
       return;
     }
@@ -1742,14 +1742,13 @@ var LiteWebviewsPlugin = class extends import_obsidian2.Plugin {
    *  同步记录并清空 srcdoc/src（立即停止加载/释放资源）→ 显示缓存截图/占位 →
    *  后台用临时 webview 补抓最新截图。srcdoc 晚赋值时由 handle 再次调用本方法。 */
   async suspendIframe(wv) {
-    wv.dataset.noAutoplayScreenshot = "screenshot";
+    this.store.get(wv).phase = "screenshot";
     this.store.get(wv).locked = false;
     this.liveCards.delete(wv);
     this.removeCardButtons(wv);
     const markNode = wv.closest(".canvas-node") || this.napParent(wv);
     if (markNode) {
-      delete markNode.dataset.noAutoplayActivatedSrc;
-      delete markNode.dataset.noAutoplayActivatedUntil;
+      this.store.clearActivated(markNode);
       this.store.container(markNode).locked = false;
     }
     const rawDoc = wv.getAttribute("srcdoc") || "";
@@ -1792,13 +1791,13 @@ var LiteWebviewsPlugin = class extends import_obsidian2.Plugin {
    *  立即同步置空中止加载，绝不先做抓图等耗时操作，避免页面趁机加载。
    */
   async switchToScreenshot(wv, fresh = false) {
-    if (wv.dataset.noAutoplayScreenshot === "screenshot")
+    if (this.store.isSuspended(wv))
       return;
     if (wv.tagName === "IFRAME") {
       await this.suspendIframe(wv);
       return;
     }
-    wv.dataset.noAutoplayScreenshot = "screenshot";
+    this.store.get(wv).phase = "screenshot";
     this.store.get(wv).locked = false;
     this.liveCards.delete(wv);
     this.removeCardButtons(wv);
@@ -1807,8 +1806,7 @@ var LiteWebviewsPlugin = class extends import_obsidian2.Plugin {
       opNode.classList.remove("nap-operating");
     const node = wv.closest(".canvas-node") || wv.parentElement;
     if (node) {
-      delete node.dataset.noAutoplayActivatedSrc;
-      delete node.dataset.noAutoplayActivatedUntil;
+      this.store.clearActivated(node);
       this.store.container(node).locked = false;
     }
     let src = this.store.get(wv).src;
@@ -2043,7 +2041,7 @@ var LiteWebviewsPlugin = class extends import_obsidian2.Plugin {
     } catch (e) {
     }
     this.store.get(el).src = stored.src || "";
-    el.dataset.noAutoplayScreenshot = "screenshot";
+    this.store.get(el).phase = "screenshot";
     this.store.get(el).muted = (_a = stored.muted) != null ? _a : null;
     this.store.get(el).locked = !!stored.locked;
     const ph = parent.querySelector(".no-autoplay-placeholder");
@@ -2099,7 +2097,7 @@ var LiteWebviewsPlugin = class extends import_obsidian2.Plugin {
         return;
       if (!wv.isConnected)
         return;
-      if (wv.dataset.noAutoplayScreenshot !== "live")
+      if (!this.store.isLive(wv))
         return;
       const src = this.store.get(wv).src;
       if (!src || isBlank(wv) || typeof wv.capturePage !== "function")
@@ -2279,15 +2277,15 @@ var LiteWebviewsPlugin = class extends import_obsidian2.Plugin {
         }
         this.applyIframePlugins(oldEl);
       }
-      oldEl.dataset.noAutoplayScreenshot = "live";
+      this.store.get(oldEl).phase = "live";
       this.store.get(oldEl).locked = false;
       this.liveCards.add(oldEl);
       this.lastActiveWv = oldEl;
       this.removeCardButtons(oldEl);
       const markNode = oldEl.closest(".canvas-node") || parent;
       if (markNode) {
-        markNode.dataset.noAutoplayActivatedSrc = "iframe";
-        markNode.dataset.noAutoplayActivatedUntil = String(Date.now() + ACTIVATION_MARK_TTL_MS);
+        this.store.container(markNode).activatedSrc = "iframe";
+        this.store.container(markNode).activatedAt = Date.now();
         this.store.container(markNode).locked = false;
       }
       const status2 = this.showStatus(parent, "\u52A0\u8F7D\u4E2D\u2026");
@@ -2305,9 +2303,9 @@ var LiteWebviewsPlugin = class extends import_obsidian2.Plugin {
         wv = this.createWebviewFromSnapshot(parent, stored);
       }
     }
-    if (wv.dataset.noAutoplayScreenshot === "live")
+    if (this.store.isLive(wv))
       return;
-    wv.dataset.noAutoplayScreenshot = "live";
+    this.store.get(wv).phase = "live";
     this.store.get(wv).locked = false;
     this.liveCards.add(wv);
     this.lastActiveWv = wv;
@@ -2317,8 +2315,8 @@ var LiteWebviewsPlugin = class extends import_obsidian2.Plugin {
     const src = this.store.get(wv).src;
     const node = wv.closest(".canvas-node") || wv.parentElement;
     if (node) {
-      node.dataset.noAutoplayActivatedSrc = src;
-      node.dataset.noAutoplayActivatedUntil = String(Date.now() + ACTIVATION_MARK_TTL_MS);
+      this.store.container(node).activatedSrc = src;
+      this.store.container(node).activatedAt = Date.now();
       this.store.container(node).locked = false;
       this.store.container(node).muted = this.store.get(wv).muted;
     }
@@ -2574,12 +2572,12 @@ var LiteWebviewsPlugin = class extends import_obsidian2.Plugin {
     }
     const target = isScreenshotTargetEl(el, cat);
     const screenshotEnabled = this.settings.screenshotMode && this.settings.screenshotScope[cat] && target;
-    const willSuspend = screenshotEnabled && el.tagName === "IFRAME" && cat === "excalidraw" && el.dataset.noAutoplayScreenshot !== "screenshot" && el.dataset.noAutoplayScreenshot !== "live";
+    const willSuspend = screenshotEnabled && el.tagName === "IFRAME" && cat === "excalidraw" && !this.store.isSuspended(el) && !this.store.isLive(el);
     if (el.tagName === "WEBVIEW") {
       this.applyMuteState(el, cat);
       this.applyBackgroundFix(el);
     } else if (el.tagName === "IFRAME" && cat === "excalidraw") {
-      if (el.dataset.noAutoplayScreenshot === "screenshot") {
+      if (this.store.isSuspended(el)) {
         const lateDoc = el.getAttribute("srcdoc") || "";
         const lateSrc = el.getAttribute("src") || "";
         if (lateDoc.trim() || lateSrc && lateSrc !== "about:blank") {
@@ -2605,16 +2603,16 @@ var LiteWebviewsPlugin = class extends import_obsidian2.Plugin {
     }
     if (screenshotEnabled && (el.tagName === "WEBVIEW" || el.tagName === "IFRAME" && cat === "excalidraw")) {
       const node = el.closest(".canvas-node") || el.parentElement;
-      if (node && node.dataset.noAutoplayActivatedSrc && Number(node.dataset.noAutoplayActivatedUntil || 0) > Date.now()) {
+      if (node && this.store.isActivated(node, ACTIVATION_MARK_TTL_MS)) {
         const isIframe = el.tagName === "IFRAME";
         let cur = "";
         try {
           cur = el.src || "";
         } catch (e) {
         }
-        if (isIframe || cur === node.dataset.noAutoplayActivatedSrc) {
+        if (isIframe || cur === this.store.container(node).activatedSrc) {
           const alreadyManaged = this.liveCards.has(el);
-          el.dataset.noAutoplayScreenshot = "live";
+          this.store.get(el).phase = "live";
           this.store.get(el).locked = this.store.container(node).locked;
           this.store.get(el).muted = this.store.container(node).muted;
           this.liveCards.add(el);
@@ -2628,12 +2626,12 @@ var LiteWebviewsPlugin = class extends import_obsidian2.Plugin {
         }
       }
     }
-    if (screenshotEnabled && el.dataset.noAutoplayScreenshot === "live" && !this.liveCards.has(el)) {
+    if (screenshotEnabled && this.store.isLive(el) && !this.liveCards.has(el)) {
       this.liveCards.add(el);
       this.removeCardButtons(el);
       this.addCardButtons(el);
     }
-    if (screenshotEnabled && el.dataset.noAutoplayScreenshot !== "screenshot" && el.dataset.noAutoplayScreenshot !== "live") {
+    if (screenshotEnabled && !this.store.isSuspended(el) && !this.store.isLive(el)) {
       await this.switchToScreenshot(el, true);
     }
   }
@@ -2956,7 +2954,7 @@ var LiteWebviewsPlugin = class extends import_obsidian2.Plugin {
             return;
           const cat = categorize(el);
           if (this.settings.screenshotMode && this.settings.screenshotScope[cat] && isScreenshotTargetEl(el, cat)) {
-            this.switchToScreenshot(el, el.dataset.noAutoplayScreenshot !== "live").catch(
+            this.switchToScreenshot(el, !this.store.isLive(el)).catch(
               () => {
               }
             );
@@ -3050,7 +3048,7 @@ var LiteWebviewsPlugin = class extends import_obsidian2.Plugin {
           new import_obsidian2.Notice("Lite Webviews\uFF1A\u5F53\u524D\u6CA1\u6709\u53EF\u6302\u8D77\u7684\u5361\u7247");
           return;
         }
-        if (wv.dataset.noAutoplayScreenshot === "screenshot")
+        if (this.store.isSuspended(wv))
           return;
         this.switchToScreenshot(wv).catch(() => {
         });
@@ -3082,7 +3080,7 @@ var LiteWebviewsPlugin = class extends import_obsidian2.Plugin {
       const cat = categorize(el);
       if (!this.settings.screenshotScope[cat] || !isScreenshotTargetEl(el, cat))
         return;
-      if (el.dataset.noAutoplayScreenshot === "screenshot")
+      if (this.store.isSuspended(el))
         return;
       this.switchToScreenshot(el, false).catch(() => {
       });
@@ -3116,8 +3114,7 @@ var LiteWebviewsPlugin = class extends import_obsidian2.Plugin {
       const node = el.closest(".canvas-node") || el.parentElement || this.napParent(el);
       if (!node || !node.dataset)
         return;
-      delete node.dataset.noAutoplayActivatedSrc;
-      delete node.dataset.noAutoplayActivatedUntil;
+      this.store.clearActivated(node);
       this.store.container(node).locked = false;
     } catch (e) {
     }
@@ -3151,7 +3148,7 @@ var LiteWebviewsPlugin = class extends import_obsidian2.Plugin {
         }
       }
     }
-    el.dataset.noAutoplayScreenshot = "live";
+    this.store.get(el).phase = "live";
     this.store.get(el).locked = false;
     if (clearMarkers)
       this.clearActivationMarkers(el);
@@ -3213,7 +3210,7 @@ var LiteWebviewsPlugin = class extends import_obsidian2.Plugin {
         this.applyMuteState(el, cat);
         this.applyBackgroundFix(el);
       } else if (el.tagName === "IFRAME" && cat === "excalidraw") {
-        if (el.dataset.noAutoplayScreenshot === "screenshot")
+        if (this.store.isSuspended(el))
           return;
         this.applyIframePlugins(el);
       }
