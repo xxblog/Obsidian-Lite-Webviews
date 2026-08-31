@@ -22,6 +22,22 @@ export const MAX_TEMP_CAPTURES = 3;
 // 间隔不必太短，避免大画布下频繁全文档 querySelectorAll
 export const SWEEP_INTERVAL_MS = 10000;
 
+// —— 各流程使用的固定时长/时限（集中命名，避免散落的魔法数字）——
+
+// 容器"激活继承"标记的有效期：标记只存在 DOM 里，重启 Obsidian 后自然消失，
+// 该时限只约束同一会话内"重建元素继承 live"的最长有效期
+export const ACTIVATION_MARK_TTL_MS = 12 * 3600 * 1000;
+// 窗口 blur 误报判定窗口：webview 抢焦点会让窗口瞬间 blur，窗口期内恢复就不算"切走应用"
+export const BLUR_GUARD_MS = 300;
+// 临时 webview 抓图前的渲染静置时长（页面加载完成后等 JS 画出首帧）
+export const TEMP_CAPTURE_SETTLE_MS = 800;
+// live 卡片点开期间静默抓图前的静置时长（比临时抓图更宽，确保渲染完整）
+export const LIVE_CAPTURE_SETTLE_MS = 1000;
+// "加载中…"状态文本的兜底移除时限（页面没触发 dom-ready/失败事件时也会消失）
+export const STATUS_TIMEOUT_MS = 10000;
+// 右键菜单弹出前等待"右键松开"的兜底时限（异常输入环境收不到 pointerup 也照常弹菜单）
+export const CONTEXT_MENU_FALLBACK_MS = 600;
+
 // 修复背景透明：仅当页面自身 html/body 背景确实透明时才补充白色背景。
 // 如果站点已有自己的背景色（包括深色主题），则不干预，避免把黑底站点改白。
 export const BG_FIX_MARKER = '__napBgFixStyle';

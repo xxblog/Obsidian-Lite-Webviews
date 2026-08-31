@@ -12,6 +12,7 @@ export interface LiteWebviewsSettings {
 	buttonFontSizePx: number; // 卡片按钮/状态文字的屏幕字号（固定像素，不随画布缩放变化）
 	captureMinScreenPx: number; // 抓图最小屏幕短边（px）；卡片太小不抓图，0 = 不限制
 	screenshotQuality: number; // 截图质量（%），10-100；100 使用 PNG 无损保存，<100 使用 JPEG
+	screenshotMaxEdgePx: number; // 截图存盘前按最长边降采样的上限（px），0 = 不限制
 	fixTransparentBackground: boolean; // 修复部分网页在 Obsidian 中背景透明、透出控件的问题
 	killRendererOnSuspend: boolean; // 挂起时杀渲染进程（实验性，彻底释放内存）
 	cacheSizeLimitMB: number; // 截图缓存大小上限（MB），0 = 不限制
@@ -27,6 +28,7 @@ export const DEFAULT_SETTINGS: LiteWebviewsSettings = {
 	buttonFontSizePx: 13,
 	captureMinScreenPx: 100,
 	screenshotQuality: 80,
+	screenshotMaxEdgePx: 1280,
 	fixTransparentBackground: true,
 	killRendererOnSuspend: false,
 	cacheSizeLimitMB: 50,
@@ -34,6 +36,7 @@ export const DEFAULT_SETTINGS: LiteWebviewsSettings = {
 
 export class LiteWebviewsSettingsTab extends PluginSettingTab {
 	plugin: LiteWebviewsPlugin;
+	cacheCheckTimer: any = null; // 缓存上限调整后的"按新上限清理"防抖句柄
 
 	constructor(app: App, plugin: LiteWebviewsPlugin) {
 		super(app, plugin);
@@ -77,6 +80,14 @@ export class LiteWebviewsSettingsTab extends PluginSettingTab {
 			this.containerEl.createEl('p', {
 				text: '设置页渲染出错：' + (e && e.message ? e.message : e) + '（详见开发者工具控制台）',
 			});
+		}
+	}
+
+	hide() {
+		// 设置页关闭时放弃尚未执行的"按新上限清理"防抖任务
+		if (this.cacheCheckTimer) {
+			clearTimeout(this.cacheCheckTimer);
+			this.cacheCheckTimer = null;
 		}
 	}
 
@@ -178,6 +189,20 @@ export class LiteWebviewsSettingsTab extends PluginSettingTab {
 				});
 			});
 		new Setting(containerEl)
+			.setName('截图分辨率上限（px）')
+			.setDesc('存盘前按最长边降采样，0 不限制。占位图是缩放显示的，过高分辨率只增加磁盘与内存开销')
+			.addText((t) => {
+				t.setValue(String(this.plugin.settings.screenshotMaxEdgePx));
+				this.bindNumber(t, () => this.plugin.settings.screenshotMaxEdgePx, 0, 4096, 160);
+				t.onChange(async (v) => {
+					const n = parseInt(v, 10);
+					if (!isNaN(n) && n >= 0 && n <= 4096) {
+						this.plugin.settings.screenshotMaxEdgePx = n;
+						this.plugin.saveSettings();
+					}
+				});
+			});
+		new Setting(containerEl)
 			.setName('最小抓图尺寸（px）')
 			.setDesc('0 不限制')
 			.addText((t) => {
@@ -267,12 +292,18 @@ export class LiteWebviewsSettingsTab extends PluginSettingTab {
 		// 截图缓存
 		containerEl.createDiv({ cls: 'nap-group-header', text: '截图缓存' });
 
-		let sizeText = '计算中…';
-		const sizeInfo = containerEl.createEl('p', { text: '当前缓存：' + sizeText, cls: 'setting-item-description' });
-		(async () => {
-			const bytes = await this.plugin.cacheSize();
-			sizeInfo.setText('当前缓存：' + (bytes / 1024 / 1024).toFixed(2) + ' MB');
-		})();
+		const sizeInfo = containerEl.createEl('p', { text: '当前缓存：计算中…', cls: 'setting-item-description' });
+		const showCacheSize = async (note?: string) => {
+			try {
+				const bytes = await this.plugin.cacheSize();
+				sizeInfo.setText(
+					'当前缓存：' + (bytes / 1024 / 1024).toFixed(2) + ' MB' + (note ? '（' + note + '）' : '')
+				);
+			} catch (e) {
+				/* ignore */
+			}
+		};
+		showCacheSize();
 
 		new Setting(containerEl)
 			.setName('缓存大小上限（MB）')
@@ -285,6 +316,14 @@ export class LiteWebviewsSettingsTab extends PluginSettingTab {
 					if (!isNaN(n) && n >= 0) {
 						this.plugin.settings.cacheSizeLimitMB = n;
 						this.plugin.saveSettings();
+						// 上限被调低时按新上限立即清理一次（连续键入只在停顿后执行），
+						// 顺带刷新设置页的缓存尺寸显示
+						if (this.cacheCheckTimer) clearTimeout(this.cacheCheckTimer);
+						this.cacheCheckTimer = setTimeout(async () => {
+							this.cacheCheckTimer = null;
+							const deleted = await this.plugin.cleanupCache();
+							if (deleted > 0) showCacheSize('已按新上限清理 ' + deleted + ' 个文件');
+						}, 600);
 					}
 				});
 			});
@@ -298,17 +337,15 @@ export class LiteWebviewsSettingsTab extends PluginSettingTab {
 					const deleted = await this.plugin.cleanupCache(true);
 					const after = await this.plugin.cacheSize();
 					if (deleted > 0) {
-						sizeInfo.setText(
-							'当前缓存：' +
-								(after / 1024 / 1024).toFixed(2) +
-								' MB（已清理 ' +
+						showCacheSize(
+							'已清理 ' +
 								deleted +
 								' 个文件，释放 ' +
 								((before - after) / 1024 / 1024).toFixed(2) +
-								' MB）'
+								' MB'
 						);
 					} else {
-						sizeInfo.setText('当前缓存：' + (after / 1024 / 1024).toFixed(2) + ' MB（缓存已为空，无需清理）');
+						showCacheSize('缓存已为空，无需清理');
 					}
 				})
 			);

@@ -1,14 +1,20 @@
 import { Menu, Notice, Plugin } from 'obsidian';
 import {
+	ACTIVATION_MARK_TTL_MS,
 	BG_FIX_CLEANUP_JS,
 	BG_FIX_JS,
 	BG_FIX_MARKER,
+	BLUR_GUARD_MS,
+	CONTEXT_MENU_FALLBACK_MS,
 	DRAG_THRESHOLD,
 	EMBED_SELECTOR,
+	LIVE_CAPTURE_SETTLE_MS,
 	MAX_SRCDOC_CAPTURE,
 	MAX_TEMP_CAPTURES,
 	MUTE_SCRIPT_MARKER,
+	STATUS_TIMEOUT_MS,
 	SWEEP_INTERVAL_MS,
+	TEMP_CAPTURE_SETTLE_MS,
 	injectBackgroundFixHtml,
 	injectMuteHtml,
 	stripBackgroundFixHtml,
@@ -55,6 +61,7 @@ export default class LiteWebviewsPlugin extends Plugin {
 	windows = new Set<any>(); // 主窗口 + 全部 popout 窗口（样式/观察器/事件按窗口挂载）
 	winObservers = new Map<any, any>(); // MutationObserver -> 所属窗口
 	cacheBytes = -1; // 缓存总字节的内存记账（-1 = 未知，cleanupCache 时校准）
+	cacheInfoMemo = new Map(); // src -> existingCacheInfo 结果（含 null）；写/清缓存时失效，省重复的 exists/stat 跨进程往返
 	cleanupSoonTimer = null; // 缓存超限清理的防抖句柄
 	saveTimer = null; // 设置写盘的防抖句柄
 	warnedLargeDoc = false; // 超大快照跳过抓图只警告一次
@@ -100,6 +107,39 @@ export default class LiteWebviewsPlugin extends Plugin {
 		return this.effectiveScreenshotQuality() < 100 ? 'jpg' : 'png';
 	}
 
+	/** 截图最长边上限（px）：0 = 显式关闭；非法值回退默认；合法值收敛到 320~4096 */
+	effectiveScreenshotMaxEdge() {
+		const n = parseInt(String(this.settings.screenshotMaxEdgePx), 10);
+		if (isNaN(n)) return DEFAULT_SETTINGS.screenshotMaxEdgePx;
+		if (n <= 0) return 0;
+		return Math.min(4096, Math.max(320, n));
+	}
+
+	/** 存盘前按最长边降采样。
+	 *  capturePage() 返回的是【物理像素】图：Retina 上一张 400×300 CSS 的卡片会抓出约
+	 *  3400×2600，像素量是占位图实际显示所需的十几倍。而占位图是用 object-fit: cover
+	 *  缩放呈现的，多出来的分辨率既看不见，又要付出磁盘体积和位图解码内存的双重代价
+	 *  （实测一张 3455×2694 的 PNG 解码后约 35MB）——这与本插件"省内存"的目标直接相悖。
+	 *  任何一步不可用或失败都原样返回原图：宁可存大图，也不写坏缓存。 */
+	downscaleForCache(image) {
+		const maxEdge = this.effectiveScreenshotMaxEdge();
+		if (!maxEdge || !image) return image;
+		try {
+			if (typeof image.getSize !== 'function' || typeof image.resize !== 'function') return image;
+			const { width, height } = image.getSize();
+			if (!width || !height) return image;
+			if (Math.max(width, height) <= maxEdge) return image;
+			// 只指定一条边，让 Electron 按原始宽高比自己算另一条，避免两边分别取整把比例带偏
+			const opts = width >= height ? { width: maxEdge } : { height: maxEdge };
+			const resized = image.resize({ ...opts, quality: 'good' });
+			if (!resized) return image;
+			if (typeof resized.isEmpty === 'function' && resized.isEmpty()) return image;
+			return resized;
+		} catch (e) {
+			return image;
+		}
+	}
+
 	cachePathFor(src, ext) {
 		return `${this.cacheDir()}/${hashUrl(src)}.${ext || this.screenshotExt()}`;
 	}
@@ -139,6 +179,7 @@ export default class LiteWebviewsPlugin extends Plugin {
 	async cleanupCache(force = false) {
 		const limitBytes = (this.settings.cacheSizeLimitMB || 0) * 1024 * 1024;
 		if (!force && limitBytes <= 0) return 0;
+		this.cacheInfoMemo.clear(); // 即将删文件，memo 里的路径/mtime 不可再信
 		try {
 			const adapter = this.app.vault.adapter;
 			if (!(await adapter.exists(this.cacheDir()))) return 0;
@@ -214,14 +255,18 @@ export default class LiteWebviewsPlugin extends Plugin {
 		});
 	}
 
-	/** 找到该地址对应的缓存文件（跨 png/jpg 兼容 + 空文件清理），返回 { path, mtime } 或 null */
+	/** 找到该地址对应的缓存文件（跨 png/jpg 兼容 + 空文件清理），返回 { path, mtime } 或 null。
+	 *  结果按 src memo 到内存（含 null）：同一张卡的初始填充与补抓刷新会连续查同一个键，
+	 *  memo 掉成对的 exists/stat 跨进程往返；写入/清理缓存时按需失效。 */
 	async existingCacheInfo(src) {
 		if (!src) return null;
+		if (this.cacheInfoMemo.has(src)) return this.cacheInfoMemo.get(src) || null;
 		try {
 			const adapter = this.app.vault.adapter;
 			const preferredExt = this.screenshotExt();
 			// 兼容旧版本/不同质量设置留下的 .png/.jpg 缓存。
 			const exts = preferredExt === 'jpg' ? ['jpg', 'png'] : ['png', 'jpg'];
+			let info = null;
 			for (const candidate of exts) {
 				const candidatePath = this.cachePathFor(src, candidate);
 				if (!(await adapter.exists(candidatePath))) continue;
@@ -240,9 +285,13 @@ export default class LiteWebviewsPlugin extends Plugin {
 					}
 					continue;
 				}
-				return { path: candidatePath, mtime: st.mtime || 0 };
+				info = { path: candidatePath, mtime: st.mtime || 0 };
+				break;
 			}
-			return null;
+			// 条目极小（路径+mtime），2000 个上限只是防极端场景无限增长
+			if (this.cacheInfoMemo.size >= 2000) this.cacheInfoMemo.clear();
+			this.cacheInfoMemo.set(src, info);
+			return info;
 		} catch (e) {
 			return null;
 		}
@@ -283,8 +332,10 @@ export default class LiteWebviewsPlugin extends Plugin {
 			if (!nativeImage) return;
 			if (typeof nativeImage.isEmpty === 'function' && nativeImage.isEmpty()) return;
 			const quality = this.effectiveScreenshotQuality();
-			const useJpeg = quality < 100 && typeof nativeImage.toJPEG === 'function';
-			const data = useJpeg ? nativeImage.toJPEG(quality) : nativeImage.toPNG();
+			// 先降采样再编码：既省磁盘，也省占位图显示时的位图解码内存
+			const image = this.downscaleForCache(nativeImage);
+			const useJpeg = quality < 100 && typeof image.toJPEG === 'function';
+			const data = useJpeg ? image.toJPEG(quality) : image.toPNG();
 			if (!data || data.length < 100) return;
 			await this.ensureCacheDir();
 			const adapter = this.app.vault.adapter;
@@ -311,6 +362,7 @@ export default class LiteWebviewsPlugin extends Plugin {
 			}
 			const ab = data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength);
 			await adapter.writeBinary(targetPath, ab);
+			this.cacheInfoMemo.delete(src); // 写入了新图，失效 memo 让下次读到新的 mtime
 			this.noteCacheDelta(delta);
 		} catch (e) {
 			/* 截图保存失败不致命 */
@@ -372,8 +424,11 @@ export default class LiteWebviewsPlugin extends Plugin {
 			img.draggable = false;
 			overlay.prepend(img);
 		}
-		// 同路径补抓了新图，追加时间戳绕过 Chromium 的图片缓存
-		img.src = info.url + (info.url.includes('?') ? '&' : '?') + 'r=' + Date.now();
+		// 同路径补抓了新图，追加时间戳绕过 Chromium 的图片缓存；
+		// data URL（getResourcePath 不可用时的回退）带查询串会失效，不能追加
+		img.src = info.url.startsWith('data:')
+			? info.url
+			: info.url + (info.url.includes('?') ? '&' : '?') + 'r=' + Date.now();
 		this.updateFreshness(overlay, info.mtime);
 	}
 
@@ -437,7 +492,7 @@ export default class LiteWebviewsPlugin extends Plugin {
 			// 级静音更早生效（此处的 doc 是剥离插件注入后的临时副本，注入不会污染快照）
 			wv.setAttribute('src', doc ? htmlToDataUrl(injectMuteHtml(doc)) : src);
 			await this.waitForLoadEvent(wv, 4000);
-			await new Promise((r) => setTimeout(r, 800)); // 渲染静置
+			await new Promise((r) => setTimeout(r, TEMP_CAPTURE_SETTLE_MS)); // 渲染静置
 			if (shouldAbort && shouldAbort()) return null;
 			return await wv.capturePage();
 		} catch (e) {
@@ -771,7 +826,11 @@ export default class LiteWebviewsPlugin extends Plugin {
 			const reMute = () => {
 				try {
 					if (typeof wv.setAudioMuted === 'function') {
-						wv.setAudioMuted(this.shouldMute(wv, categorize(wv)));
+						const want = this.shouldMute(wv, categorize(wv));
+						wv.setAudioMuted(want);
+						// 同步去重标记：applyMuteState 靠它判断状态是否变化；元素"先插入、
+						// 后归位"期间类别可能变过，不同步会让下一轮 sweep 多做一次冗余切换
+						wv.dataset.noAutoplayMuteApplied = String(want);
 					}
 				} catch (e) {
 					/* ignore */
@@ -1353,7 +1412,7 @@ export default class LiteWebviewsPlugin extends Plugin {
 	async captureAfterLoad(wv) {
 		try {
 			await this.waitForLoad(wv, 5000);
-			await new Promise((r) => setTimeout(r, 1000)); // 静置等待 JS 渲染
+			await new Promise((r) => setTimeout(r, LIVE_CAPTURE_SETTLE_MS)); // 静置等待 JS 渲染
 			if (!wv.isConnected) return;
 			if (wv.dataset.noAutoplayScreenshot !== 'live') return;
 			const src = wv.dataset.noAutoplaySrc;
@@ -1475,7 +1534,7 @@ export default class LiteWebviewsPlugin extends Plugin {
 			view.addEventListener('pointerup', onUp, true);
 			view.addEventListener('pointercancel', onUp, true);
 			// 兜底：万一收不到 pointerup（异常输入环境），600ms 后仍弹出
-			const fallback = view.setTimeout(() => finish(true), 600);
+			const fallback = view.setTimeout(() => finish(true), CONTEXT_MENU_FALLBACK_MS);
 		});
 
 		const cs = this.viewOf(parent).getComputedStyle(parent);
@@ -1557,7 +1616,7 @@ export default class LiteWebviewsPlugin extends Plugin {
 			const markNode = oldEl.closest('.canvas-node') || parent;
 			if (markNode) {
 				markNode.dataset.noAutoplayActivatedSrc = 'iframe';
-				markNode.dataset.noAutoplayActivatedUntil = String(Date.now() + 12 * 3600 * 1000);
+				markNode.dataset.noAutoplayActivatedUntil = String(Date.now() + ACTIVATION_MARK_TTL_MS);
 				markNode.dataset.noAutoplayLocked = '0';
 			}
 			const status = this.showStatus(parent, '加载中…');
@@ -1575,10 +1634,7 @@ export default class LiteWebviewsPlugin extends Plugin {
 				wv = this.createWebviewFromSnapshot(parent, stored);
 			}
 		}
-		if (!wv.dataset.noAutoplayScreenshot || wv.dataset.noAutoplayScreenshot !== 'screenshot') {
-			if (!wv.dataset.noAutoplayScreenshot) wv.dataset.noAutoplayScreenshot = 'screenshot';
-			else return;
-		}
+		if (wv.dataset.noAutoplayScreenshot === 'live') return; // 已是真网页（重复触发兜底）
 		wv.dataset.noAutoplayScreenshot = 'live';
 		wv.dataset.noAutoplayLocked = '0';
 		this.liveCards.add(wv);
@@ -1592,7 +1648,7 @@ export default class LiteWebviewsPlugin extends Plugin {
 		const node = wv.closest('.canvas-node') || wv.parentElement;
 		if (node) {
 			node.dataset.noAutoplayActivatedSrc = src;
-			node.dataset.noAutoplayActivatedUntil = String(Date.now() + 12 * 3600 * 1000);
+			node.dataset.noAutoplayActivatedUntil = String(Date.now() + ACTIVATION_MARK_TTL_MS);
 			node.dataset.noAutoplayLocked = '0';
 			if (wv.dataset.noAutoplayMuted !== undefined) {
 				node.dataset.noAutoplayMuted = wv.dataset.noAutoplayMuted;
@@ -1658,7 +1714,7 @@ export default class LiteWebviewsPlugin extends Plugin {
 			if (statusEl.isConnected) statusEl.remove();
 		};
 		const finish = () => dispose();
-		const timeout = setTimeout(finish, 10000); // 兜底：最多显示 10 秒
+		const timeout = setTimeout(finish, STATUS_TIMEOUT_MS); // 兜底：状态文本最多显示这么久
 		const onFail = (ev) => {
 			const isMain = ev && ev.isMainFrame === undefined ? true : !!ev.isMainFrame;
 			if (!isMain || (ev && ev.errorCode === -3)) return;
@@ -1851,6 +1907,17 @@ export default class LiteWebviewsPlugin extends Plugin {
 	async handle(el) {
 		if (!el || !el.dataset || isTempEmbed(el)) return; // 临时抓图元素不处理
 		const cat = categorize(el);
+		// 分类自愈：categorize 依赖祖先（.canvas-node）与 class（excalidraw__embeddable），
+		// 观察器只监听 src/srcdoc，"先插入、后归位/后补 class"的元素会被误判成兜底的
+		// webviewer（静音范围/截图范围都会按错类别处理），要等最长 10 秒的 sweep 才纠正。
+		// 延迟一帧复验：类别变了就按新类别重新处理；没变则立即退出，正常 webviewer
+		// 标签页只有一次空转的 setTimeout，开销可忽略。
+		if (cat === 'webviewer') {
+			setTimeout(() => {
+				if (this._unloaded || !el.isConnected) return;
+				if (categorize(el) !== 'webviewer') this.handle(el).catch(() => {});
+			}, 0);
+		}
 		const target = isScreenshotTargetEl(el, cat);
 		const screenshotEnabled = this.settings.screenshotMode && this.settings.screenshotScope[cat] && target;
 		// 即将被自动挂起的新 iframe 不需要先注入静音脚本（suspend 会剥离并保存原内容），
@@ -2200,7 +2267,7 @@ export default class LiteWebviewsPlugin extends Plugin {
 				this.blurGuard = null;
 				if (this.webviewFocused) return;
 				this.restartBlurTimer();
-			}, 300);
+			}, BLUR_GUARD_MS);
 		};
 		this.focusHandler = () => {
 			this.webviewFocused = false;

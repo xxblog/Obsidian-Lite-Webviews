@@ -37,6 +37,12 @@ var DRAG_THRESHOLD = 5;
 var MAX_SRCDOC_CAPTURE = 15e5;
 var MAX_TEMP_CAPTURES = 3;
 var SWEEP_INTERVAL_MS = 1e4;
+var ACTIVATION_MARK_TTL_MS = 12 * 3600 * 1e3;
+var BLUR_GUARD_MS = 300;
+var TEMP_CAPTURE_SETTLE_MS = 800;
+var LIVE_CAPTURE_SETTLE_MS = 1e3;
+var STATUS_TIMEOUT_MS = 1e4;
+var CONTEXT_MENU_FALLBACK_MS = 600;
 var BG_FIX_MARKER = "__napBgFixStyle";
 var BG_FIX_JS = "(function(){function fix(){try{var root=document.documentElement,body=document.body;if(!root||!body)return;function isTransparent(el){var c=getComputedStyle(el).backgroundColor;if(!c||c==='transparent')return true;var m=c.match(/rgba?\\(([^)]*)\\)/);if(m){var p=m[1].split(',');var a=p.length>=4?parseFloat(p[3]):1;if(a===0)return true;}return false;}if(isTransparent(root)&&isTransparent(body)){root.style.backgroundColor='#ffffff';body.style.backgroundColor='#ffffff';}}catch(e){}}if(document.readyState==='loading'){document.addEventListener('DOMContentLoaded',fix)}else{fix()}})();";
 var BG_FIX_STYLE = '<script data-nap-bg-fix="' + BG_FIX_MARKER + '">' + BG_FIX_JS + "<\/script>";
@@ -238,13 +244,16 @@ var DEFAULT_SETTINGS = {
   buttonFontSizePx: 13,
   captureMinScreenPx: 100,
   screenshotQuality: 80,
+  screenshotMaxEdgePx: 1280,
   fixTransparentBackground: true,
   killRendererOnSuspend: false,
   cacheSizeLimitMB: 50
 };
 var LiteWebviewsSettingsTab = class extends import_obsidian.PluginSettingTab {
+  // 缓存上限调整后的"按新上限清理"防抖句柄
   constructor(app, plugin) {
     super(app, plugin);
+    this.cacheCheckTimer = null;
     this.plugin = plugin;
   }
   /** 带可见标签的开关行（用官方 Setting 组件，确保兼容） */
@@ -279,6 +288,12 @@ var LiteWebviewsSettingsTab = class extends import_obsidian.PluginSettingTab {
       this.containerEl.createEl("p", {
         text: "\u8BBE\u7F6E\u9875\u6E32\u67D3\u51FA\u9519\uFF1A" + (e && e.message ? e.message : e) + "\uFF08\u8BE6\u89C1\u5F00\u53D1\u8005\u5DE5\u5177\u63A7\u5236\u53F0\uFF09"
       });
+    }
+  }
+  hide() {
+    if (this.cacheCheckTimer) {
+      clearTimeout(this.cacheCheckTimer);
+      this.cacheCheckTimer = null;
     }
   }
   _display() {
@@ -370,6 +385,17 @@ var LiteWebviewsSettingsTab = class extends import_obsidian.PluginSettingTab {
         }
       });
     });
+    new import_obsidian.Setting(containerEl).setName("\u622A\u56FE\u5206\u8FA8\u7387\u4E0A\u9650\uFF08px\uFF09").setDesc("\u5B58\u76D8\u524D\u6309\u6700\u957F\u8FB9\u964D\u91C7\u6837\uFF0C0 \u4E0D\u9650\u5236\u3002\u5360\u4F4D\u56FE\u662F\u7F29\u653E\u663E\u793A\u7684\uFF0C\u8FC7\u9AD8\u5206\u8FA8\u7387\u53EA\u589E\u52A0\u78C1\u76D8\u4E0E\u5185\u5B58\u5F00\u9500").addText((t) => {
+      t.setValue(String(this.plugin.settings.screenshotMaxEdgePx));
+      this.bindNumber(t, () => this.plugin.settings.screenshotMaxEdgePx, 0, 4096, 160);
+      t.onChange(async (v) => {
+        const n = parseInt(v, 10);
+        if (!isNaN(n) && n >= 0 && n <= 4096) {
+          this.plugin.settings.screenshotMaxEdgePx = n;
+          this.plugin.saveSettings();
+        }
+      });
+    });
     new import_obsidian.Setting(containerEl).setName("\u6700\u5C0F\u6293\u56FE\u5C3A\u5BF8\uFF08px\uFF09").setDesc("0 \u4E0D\u9650\u5236").addText((t) => {
       t.setValue(String(this.plugin.settings.captureMinScreenPx));
       this.bindNumber(t, () => this.plugin.settings.captureMinScreenPx, 0, 1e4, 10);
@@ -439,12 +465,17 @@ var LiteWebviewsSettingsTab = class extends import_obsidian.PluginSettingTab {
       });
     });
     containerEl.createDiv({ cls: "nap-group-header", text: "\u622A\u56FE\u7F13\u5B58" });
-    let sizeText = "\u8BA1\u7B97\u4E2D\u2026";
-    const sizeInfo = containerEl.createEl("p", { text: "\u5F53\u524D\u7F13\u5B58\uFF1A" + sizeText, cls: "setting-item-description" });
-    (async () => {
-      const bytes = await this.plugin.cacheSize();
-      sizeInfo.setText("\u5F53\u524D\u7F13\u5B58\uFF1A" + (bytes / 1024 / 1024).toFixed(2) + " MB");
-    })();
+    const sizeInfo = containerEl.createEl("p", { text: "\u5F53\u524D\u7F13\u5B58\uFF1A\u8BA1\u7B97\u4E2D\u2026", cls: "setting-item-description" });
+    const showCacheSize = async (note) => {
+      try {
+        const bytes = await this.plugin.cacheSize();
+        sizeInfo.setText(
+          "\u5F53\u524D\u7F13\u5B58\uFF1A" + (bytes / 1024 / 1024).toFixed(2) + " MB" + (note ? "\uFF08" + note + "\uFF09" : "")
+        );
+      } catch (e) {
+      }
+    };
+    showCacheSize();
     new import_obsidian.Setting(containerEl).setName("\u7F13\u5B58\u5927\u5C0F\u4E0A\u9650\uFF08MB\uFF09").setDesc("0 \u4E0D\u9650\u5236").addText((t) => {
       t.setValue(String(this.plugin.settings.cacheSizeLimitMB));
       this.bindNumber(t, () => this.plugin.settings.cacheSizeLimitMB, 0, 1e5, 100);
@@ -453,6 +484,14 @@ var LiteWebviewsSettingsTab = class extends import_obsidian.PluginSettingTab {
         if (!isNaN(n) && n >= 0) {
           this.plugin.settings.cacheSizeLimitMB = n;
           this.plugin.saveSettings();
+          if (this.cacheCheckTimer)
+            clearTimeout(this.cacheCheckTimer);
+          this.cacheCheckTimer = setTimeout(async () => {
+            this.cacheCheckTimer = null;
+            const deleted = await this.plugin.cleanupCache();
+            if (deleted > 0)
+              showCacheSize("\u5DF2\u6309\u65B0\u4E0A\u9650\u6E05\u7406 " + deleted + " \u4E2A\u6587\u4EF6");
+          }, 600);
         }
       });
     });
@@ -462,11 +501,11 @@ var LiteWebviewsSettingsTab = class extends import_obsidian.PluginSettingTab {
         const deleted = await this.plugin.cleanupCache(true);
         const after = await this.plugin.cacheSize();
         if (deleted > 0) {
-          sizeInfo.setText(
-            "\u5F53\u524D\u7F13\u5B58\uFF1A" + (after / 1024 / 1024).toFixed(2) + " MB\uFF08\u5DF2\u6E05\u7406 " + deleted + " \u4E2A\u6587\u4EF6\uFF0C\u91CA\u653E " + ((before - after) / 1024 / 1024).toFixed(2) + " MB\uFF09"
+          showCacheSize(
+            "\u5DF2\u6E05\u7406 " + deleted + " \u4E2A\u6587\u4EF6\uFF0C\u91CA\u653E " + ((before - after) / 1024 / 1024).toFixed(2) + " MB"
           );
         } else {
-          sizeInfo.setText("\u5F53\u524D\u7F13\u5B58\uFF1A" + (after / 1024 / 1024).toFixed(2) + " MB\uFF08\u7F13\u5B58\u5DF2\u4E3A\u7A7A\uFF0C\u65E0\u9700\u6E05\u7406\uFF09");
+          showCacheSize("\u7F13\u5B58\u5DF2\u4E3A\u7A7A\uFF0C\u65E0\u9700\u6E05\u7406");
         }
       })
     );
@@ -607,6 +646,8 @@ var LiteWebviewsPlugin = class extends import_obsidian2.Plugin {
     // MutationObserver -> 所属窗口
     this.cacheBytes = -1;
     // 缓存总字节的内存记账（-1 = 未知，cleanupCache 时校准）
+    this.cacheInfoMemo = /* @__PURE__ */ new Map();
+    // src -> existingCacheInfo 结果（含 null）；写/清缓存时失效，省重复的 exists/stat 跨进程往返
     this.cleanupSoonTimer = null;
     // 缓存超限清理的防抖句柄
     this.saveTimer = null;
@@ -658,6 +699,44 @@ var LiteWebviewsPlugin = class extends import_obsidian2.Plugin {
   screenshotExt() {
     return this.effectiveScreenshotQuality() < 100 ? "jpg" : "png";
   }
+  /** 截图最长边上限（px）：0 = 显式关闭；非法值回退默认；合法值收敛到 320~4096 */
+  effectiveScreenshotMaxEdge() {
+    const n = parseInt(String(this.settings.screenshotMaxEdgePx), 10);
+    if (isNaN(n))
+      return DEFAULT_SETTINGS.screenshotMaxEdgePx;
+    if (n <= 0)
+      return 0;
+    return Math.min(4096, Math.max(320, n));
+  }
+  /** 存盘前按最长边降采样。
+   *  capturePage() 返回的是【物理像素】图：Retina 上一张 400×300 CSS 的卡片会抓出约
+   *  3400×2600，像素量是占位图实际显示所需的十几倍。而占位图是用 object-fit: cover
+   *  缩放呈现的，多出来的分辨率既看不见，又要付出磁盘体积和位图解码内存的双重代价
+   *  （实测一张 3455×2694 的 PNG 解码后约 35MB）——这与本插件"省内存"的目标直接相悖。
+   *  任何一步不可用或失败都原样返回原图：宁可存大图，也不写坏缓存。 */
+  downscaleForCache(image) {
+    const maxEdge = this.effectiveScreenshotMaxEdge();
+    if (!maxEdge || !image)
+      return image;
+    try {
+      if (typeof image.getSize !== "function" || typeof image.resize !== "function")
+        return image;
+      const { width, height } = image.getSize();
+      if (!width || !height)
+        return image;
+      if (Math.max(width, height) <= maxEdge)
+        return image;
+      const opts = width >= height ? { width: maxEdge } : { height: maxEdge };
+      const resized = image.resize({ ...opts, quality: "good" });
+      if (!resized)
+        return image;
+      if (typeof resized.isEmpty === "function" && resized.isEmpty())
+        return image;
+      return resized;
+    } catch (e) {
+      return image;
+    }
+  }
   cachePathFor(src, ext) {
     return `${this.cacheDir()}/${hashUrl(src)}.${ext || this.screenshotExt()}`;
   }
@@ -696,6 +775,7 @@ var LiteWebviewsPlugin = class extends import_obsidian2.Plugin {
     const limitBytes = (this.settings.cacheSizeLimitMB || 0) * 1024 * 1024;
     if (!force && limitBytes <= 0)
       return 0;
+    this.cacheInfoMemo.clear();
     try {
       const adapter = this.app.vault.adapter;
       if (!await adapter.exists(this.cacheDir()))
@@ -774,14 +854,19 @@ var LiteWebviewsPlugin = class extends import_obsidian2.Plugin {
       fr.readAsDataURL(blob);
     });
   }
-  /** 找到该地址对应的缓存文件（跨 png/jpg 兼容 + 空文件清理），返回 { path, mtime } 或 null */
+  /** 找到该地址对应的缓存文件（跨 png/jpg 兼容 + 空文件清理），返回 { path, mtime } 或 null。
+   *  结果按 src memo 到内存（含 null）：同一张卡的初始填充与补抓刷新会连续查同一个键，
+   *  memo 掉成对的 exists/stat 跨进程往返；写入/清理缓存时按需失效。 */
   async existingCacheInfo(src) {
     if (!src)
       return null;
+    if (this.cacheInfoMemo.has(src))
+      return this.cacheInfoMemo.get(src) || null;
     try {
       const adapter = this.app.vault.adapter;
       const preferredExt = this.screenshotExt();
       const exts = preferredExt === "jpg" ? ["jpg", "png"] : ["png", "jpg"];
+      let info = null;
       for (const candidate of exts) {
         const candidatePath = this.cachePathFor(src, candidate);
         if (!await adapter.exists(candidatePath))
@@ -798,9 +883,13 @@ var LiteWebviewsPlugin = class extends import_obsidian2.Plugin {
           }
           continue;
         }
-        return { path: candidatePath, mtime: st.mtime || 0 };
+        info = { path: candidatePath, mtime: st.mtime || 0 };
+        break;
       }
-      return null;
+      if (this.cacheInfoMemo.size >= 2e3)
+        this.cacheInfoMemo.clear();
+      this.cacheInfoMemo.set(src, info);
+      return info;
     } catch (e) {
       return null;
     }
@@ -841,8 +930,9 @@ var LiteWebviewsPlugin = class extends import_obsidian2.Plugin {
       if (typeof nativeImage.isEmpty === "function" && nativeImage.isEmpty())
         return;
       const quality = this.effectiveScreenshotQuality();
-      const useJpeg = quality < 100 && typeof nativeImage.toJPEG === "function";
-      const data = useJpeg ? nativeImage.toJPEG(quality) : nativeImage.toPNG();
+      const image = this.downscaleForCache(nativeImage);
+      const useJpeg = quality < 100 && typeof image.toJPEG === "function";
+      const data = useJpeg ? image.toJPEG(quality) : image.toPNG();
       if (!data || data.length < 100)
         return;
       await this.ensureCacheDir();
@@ -867,6 +957,7 @@ var LiteWebviewsPlugin = class extends import_obsidian2.Plugin {
       }
       const ab = data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength);
       await adapter.writeBinary(targetPath, ab);
+      this.cacheInfoMemo.delete(src);
       this.noteCacheDelta(delta);
     } catch (e) {
     }
@@ -926,7 +1017,7 @@ var LiteWebviewsPlugin = class extends import_obsidian2.Plugin {
       img.draggable = false;
       overlay.prepend(img);
     }
-    img.src = info.url + (info.url.includes("?") ? "&" : "?") + "r=" + Date.now();
+    img.src = info.url.startsWith("data:") ? info.url : info.url + (info.url.includes("?") ? "&" : "?") + "r=" + Date.now();
     this.updateFreshness(overlay, info.mtime);
   }
   /** 全局临时抓图并发闸：同一时刻最多 MAX_TEMP_CAPTURES 个 temp webview 存活。
@@ -983,7 +1074,7 @@ var LiteWebviewsPlugin = class extends import_obsidian2.Plugin {
       parent.appendChild(holder);
       wv.setAttribute("src", doc ? htmlToDataUrl(injectMuteHtml(doc)) : src);
       await this.waitForLoadEvent(wv, 4e3);
-      await new Promise((r) => setTimeout(r, 800));
+      await new Promise((r) => setTimeout(r, TEMP_CAPTURE_SETTLE_MS));
       if (shouldAbort && shouldAbort())
         return null;
       return await wv.capturePage();
@@ -1302,7 +1393,9 @@ var LiteWebviewsPlugin = class extends import_obsidian2.Plugin {
       const reMute = () => {
         try {
           if (typeof wv.setAudioMuted === "function") {
-            wv.setAudioMuted(this.shouldMute(wv, categorize(wv)));
+            const want2 = this.shouldMute(wv, categorize(wv));
+            wv.setAudioMuted(want2);
+            wv.dataset.noAutoplayMuteApplied = String(want2);
           }
         } catch (e) {
         }
@@ -1832,7 +1925,7 @@ var LiteWebviewsPlugin = class extends import_obsidian2.Plugin {
   async captureAfterLoad(wv) {
     try {
       await this.waitForLoad(wv, 5e3);
-      await new Promise((r) => setTimeout(r, 1e3));
+      await new Promise((r) => setTimeout(r, LIVE_CAPTURE_SETTLE_MS));
       if (!wv.isConnected)
         return;
       if (wv.dataset.noAutoplayScreenshot !== "live")
@@ -1945,7 +2038,7 @@ var LiteWebviewsPlugin = class extends import_obsidian2.Plugin {
       };
       view.addEventListener("pointerup", onUp, true);
       view.addEventListener("pointercancel", onUp, true);
-      const fallback = view.setTimeout(() => finish(true), 600);
+      const fallback = view.setTimeout(() => finish(true), CONTEXT_MENU_FALLBACK_MS);
     });
     const cs = this.viewOf(parent).getComputedStyle(parent);
     if (cs.position === "static")
@@ -2023,7 +2116,7 @@ var LiteWebviewsPlugin = class extends import_obsidian2.Plugin {
       const markNode = oldEl.closest(".canvas-node") || parent;
       if (markNode) {
         markNode.dataset.noAutoplayActivatedSrc = "iframe";
-        markNode.dataset.noAutoplayActivatedUntil = String(Date.now() + 12 * 3600 * 1e3);
+        markNode.dataset.noAutoplayActivatedUntil = String(Date.now() + ACTIVATION_MARK_TTL_MS);
         markNode.dataset.noAutoplayLocked = "0";
       }
       const status2 = this.showStatus(parent, "\u52A0\u8F7D\u4E2D\u2026");
@@ -2041,12 +2134,8 @@ var LiteWebviewsPlugin = class extends import_obsidian2.Plugin {
         wv = this.createWebviewFromSnapshot(parent, stored);
       }
     }
-    if (!wv.dataset.noAutoplayScreenshot || wv.dataset.noAutoplayScreenshot !== "screenshot") {
-      if (!wv.dataset.noAutoplayScreenshot)
-        wv.dataset.noAutoplayScreenshot = "screenshot";
-      else
-        return;
-    }
+    if (wv.dataset.noAutoplayScreenshot === "live")
+      return;
     wv.dataset.noAutoplayScreenshot = "live";
     wv.dataset.noAutoplayLocked = "0";
     this.liveCards.add(wv);
@@ -2058,7 +2147,7 @@ var LiteWebviewsPlugin = class extends import_obsidian2.Plugin {
     const node = wv.closest(".canvas-node") || wv.parentElement;
     if (node) {
       node.dataset.noAutoplayActivatedSrc = src;
-      node.dataset.noAutoplayActivatedUntil = String(Date.now() + 12 * 3600 * 1e3);
+      node.dataset.noAutoplayActivatedUntil = String(Date.now() + ACTIVATION_MARK_TTL_MS);
       node.dataset.noAutoplayLocked = "0";
       if (wv.dataset.noAutoplayMuted !== void 0) {
         node.dataset.noAutoplayMuted = wv.dataset.noAutoplayMuted;
@@ -2120,7 +2209,7 @@ var LiteWebviewsPlugin = class extends import_obsidian2.Plugin {
         statusEl.remove();
     };
     const finish = () => dispose();
-    const timeout = setTimeout(finish, 1e4);
+    const timeout = setTimeout(finish, STATUS_TIMEOUT_MS);
     const onFail = (ev) => {
       const isMain = ev && ev.isMainFrame === void 0 ? true : !!ev.isMainFrame;
       if (!isMain || ev && ev.errorCode === -3)
@@ -2305,6 +2394,15 @@ var LiteWebviewsPlugin = class extends import_obsidian2.Plugin {
     if (!el || !el.dataset || isTempEmbed(el))
       return;
     const cat = categorize(el);
+    if (cat === "webviewer") {
+      setTimeout(() => {
+        if (this._unloaded || !el.isConnected)
+          return;
+        if (categorize(el) !== "webviewer")
+          this.handle(el).catch(() => {
+          });
+      }, 0);
+    }
     const target = isScreenshotTargetEl(el, cat);
     const screenshotEnabled = this.settings.screenshotMode && this.settings.screenshotScope[cat] && target;
     const willSuspend = screenshotEnabled && el.tagName === "IFRAME" && cat === "excalidraw" && el.dataset.noAutoplayScreenshot !== "screenshot" && el.dataset.noAutoplayScreenshot !== "live";
@@ -2597,7 +2695,7 @@ var LiteWebviewsPlugin = class extends import_obsidian2.Plugin {
         if (this.webviewFocused)
           return;
         this.restartBlurTimer();
-      }, 300);
+      }, BLUR_GUARD_MS);
     };
     this.focusHandler = () => {
       this.webviewFocused = false;
