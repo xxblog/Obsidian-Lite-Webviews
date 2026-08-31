@@ -1121,7 +1121,7 @@ var LiteWebviewsPlugin = class extends import_obsidian2.Plugin {
     }
   }
   isLocked(wv) {
-    return wv.dataset.noAutoplayLocked === "1";
+    return this.store.get(wv).locked;
   }
   /** 当前可操作的卡片：最近激活的优先，其次任意 live 卡（"挂起/保活/刷新当前"命令共用） */
   currentCard() {
@@ -1524,10 +1524,9 @@ var LiteWebviewsPlugin = class extends import_obsidian2.Plugin {
   shouldMute(el, cat) {
     if (!this.settings.muteScope[cat])
       return false;
-    if (el.dataset.noAutoplayMuted === "1")
-      return true;
-    if (el.dataset.noAutoplayMuted === "0")
-      return false;
+    const own = this.store.get(el).muted;
+    if (own !== null)
+      return own;
     return !!this.settings.defaultMute;
   }
   /** 按当前设置把 webview 置为静音/非静音，并挂跳转补刀钩子 */
@@ -1744,14 +1743,14 @@ var LiteWebviewsPlugin = class extends import_obsidian2.Plugin {
    *  后台用临时 webview 补抓最新截图。srcdoc 晚赋值时由 handle 再次调用本方法。 */
   async suspendIframe(wv) {
     wv.dataset.noAutoplayScreenshot = "screenshot";
-    wv.dataset.noAutoplayLocked = "0";
+    this.store.get(wv).locked = false;
     this.liveCards.delete(wv);
     this.removeCardButtons(wv);
     const markNode = wv.closest(".canvas-node") || this.napParent(wv);
     if (markNode) {
       delete markNode.dataset.noAutoplayActivatedSrc;
       delete markNode.dataset.noAutoplayActivatedUntil;
-      delete markNode.dataset.noAutoplayLocked;
+      this.store.container(markNode).locked = false;
     }
     const rawDoc = wv.getAttribute("srcdoc") || "";
     const originalDoc = stripPluginHtml(rawDoc);
@@ -1768,8 +1767,7 @@ var LiteWebviewsPlugin = class extends import_obsidian2.Plugin {
       stored.srcdoc = "";
       stored.src = "";
     }
-    if (wv.dataset.noAutoplayMuted !== void 0)
-      stored.muted = wv.dataset.noAutoplayMuted;
+    stored.muted = this.store.get(wv).muted;
     const key = this.iframeKey(wv);
     try {
       wv.removeAttribute("srcdoc");
@@ -1801,7 +1799,7 @@ var LiteWebviewsPlugin = class extends import_obsidian2.Plugin {
       return;
     }
     wv.dataset.noAutoplayScreenshot = "screenshot";
-    wv.dataset.noAutoplayLocked = "0";
+    this.store.get(wv).locked = false;
     this.liveCards.delete(wv);
     this.removeCardButtons(wv);
     const opNode = wv.closest(".canvas-node") || (wv.classList && wv.classList.contains("excalidraw__embeddable") ? wv : null);
@@ -1811,7 +1809,7 @@ var LiteWebviewsPlugin = class extends import_obsidian2.Plugin {
     if (node) {
       delete node.dataset.noAutoplayActivatedSrc;
       delete node.dataset.noAutoplayActivatedUntil;
-      delete node.dataset.noAutoplayLocked;
+      this.store.container(node).locked = false;
     }
     let src = this.store.get(wv).src;
     if (!src && !isBlank(wv)) {
@@ -1836,8 +1834,8 @@ var LiteWebviewsPlugin = class extends import_obsidian2.Plugin {
           attrs,
           src: this.store.get(wv).src,
           cat: categorize(wv),
-          muted: wv.dataset.noAutoplayMuted,
-          locked: wv.dataset.noAutoplayLocked
+          muted: this.store.get(wv).muted,
+          locked: this.store.get(wv).locked
         });
         this.safeRemoveWebview(wv);
         if (id) {
@@ -1896,7 +1894,7 @@ var LiteWebviewsPlugin = class extends import_obsidian2.Plugin {
             attrs: this.snapshotAttrs(wv),
             src: this.store.get(wv).src,
             cat: categorize(wv),
-            muted: wv.dataset.noAutoplayMuted
+            muted: this.store.get(wv).muted
           });
           this.safeRemoveWebview(wv);
         }
@@ -2032,6 +2030,7 @@ var LiteWebviewsPlugin = class extends import_obsidian2.Plugin {
   }
   /** 根据快照重建一个 webview 元素（挂起时被移除的卡，激活时用这个复活） */
   createWebviewFromSnapshot(parent, stored) {
+    var _a;
     const el = (parent.ownerDocument || document).createElement("webview");
     for (const [k, v] of Object.entries(stored.attrs || {})) {
       try {
@@ -2045,10 +2044,8 @@ var LiteWebviewsPlugin = class extends import_obsidian2.Plugin {
     }
     this.store.get(el).src = stored.src || "";
     el.dataset.noAutoplayScreenshot = "screenshot";
-    if (stored.muted !== void 0)
-      el.dataset.noAutoplayMuted = stored.muted;
-    if (stored.locked !== void 0)
-      el.dataset.noAutoplayLocked = stored.locked;
+    this.store.get(el).muted = (_a = stored.muted) != null ? _a : null;
+    this.store.get(el).locked = !!stored.locked;
     const ph = parent.querySelector(".no-autoplay-placeholder");
     parent.insertBefore(el, ph || null);
     this.applyMuteState(el, categorize(el));
@@ -2266,13 +2263,13 @@ var LiteWebviewsPlugin = class extends import_obsidian2.Plugin {
   /** 点击占位 → 加载真网页（默认未锁定）。
    *  挂起时被移除的卡：根据快照重建元素再走正常激活流程。 */
   activate(oldEl) {
+    var _a;
     const parent = this.napParent(oldEl);
     if (oldEl.tagName === "IFRAME") {
       const stored = this.iframeDocs.get(oldEl);
       this.iframeDocs.delete(oldEl);
       if (stored) {
-        if (stored.muted !== void 0)
-          oldEl.dataset.noAutoplayMuted = stored.muted;
+        this.store.get(oldEl).muted = (_a = stored.muted) != null ? _a : null;
         try {
           if (stored.srcdoc)
             oldEl.setAttribute("srcdoc", stored.srcdoc);
@@ -2283,7 +2280,7 @@ var LiteWebviewsPlugin = class extends import_obsidian2.Plugin {
         this.applyIframePlugins(oldEl);
       }
       oldEl.dataset.noAutoplayScreenshot = "live";
-      oldEl.dataset.noAutoplayLocked = "0";
+      this.store.get(oldEl).locked = false;
       this.liveCards.add(oldEl);
       this.lastActiveWv = oldEl;
       this.removeCardButtons(oldEl);
@@ -2291,7 +2288,7 @@ var LiteWebviewsPlugin = class extends import_obsidian2.Plugin {
       if (markNode) {
         markNode.dataset.noAutoplayActivatedSrc = "iframe";
         markNode.dataset.noAutoplayActivatedUntil = String(Date.now() + ACTIVATION_MARK_TTL_MS);
-        markNode.dataset.noAutoplayLocked = "0";
+        this.store.container(markNode).locked = false;
       }
       const status2 = this.showStatus(parent, "\u52A0\u8F7D\u4E2D\u2026");
       if (status2)
@@ -2311,7 +2308,7 @@ var LiteWebviewsPlugin = class extends import_obsidian2.Plugin {
     if (wv.dataset.noAutoplayScreenshot === "live")
       return;
     wv.dataset.noAutoplayScreenshot = "live";
-    wv.dataset.noAutoplayLocked = "0";
+    this.store.get(wv).locked = false;
     this.liveCards.add(wv);
     this.lastActiveWv = wv;
     this.removeCardButtons(wv);
@@ -2322,10 +2319,8 @@ var LiteWebviewsPlugin = class extends import_obsidian2.Plugin {
     if (node) {
       node.dataset.noAutoplayActivatedSrc = src;
       node.dataset.noAutoplayActivatedUntil = String(Date.now() + ACTIVATION_MARK_TTL_MS);
-      node.dataset.noAutoplayLocked = "0";
-      if (wv.dataset.noAutoplayMuted !== void 0) {
-        node.dataset.noAutoplayMuted = wv.dataset.noAutoplayMuted;
-      }
+      this.store.container(node).locked = false;
+      this.store.container(node).muted = this.store.get(wv).muted;
     }
     if (this.store.get(wv).crashed) {
       this.store.get(wv).crashed = false;
@@ -2420,7 +2415,7 @@ var LiteWebviewsPlugin = class extends import_obsidian2.Plugin {
     muteBtn.addEventListener("click", (e) => {
       e.stopPropagation();
       const cur = this.shouldMute(wv, cat);
-      wv.dataset.noAutoplayMuted = cur ? "0" : "1";
+      this.store.get(wv).muted = !cur;
       const now = this.shouldMute(wv, cat);
       muteBtn.textContent = now ? "\u5DF2\u9759\u97F3" : "\u9759\u97F3";
       muteBtn.classList.toggle("is-muted", now);
@@ -2431,24 +2426,24 @@ var LiteWebviewsPlugin = class extends import_obsidian2.Plugin {
       }
       const node = wv.closest(".canvas-node") || this.napParent(wv);
       if (node)
-        node.dataset.noAutoplayMuted = wv.dataset.noAutoplayMuted;
+        this.store.container(node).muted = this.store.get(wv).muted;
     });
     zone.appendChild(muteBtn);
     const lockBtn = ownerDoc.createElement("div");
     lockBtn.className = "no-autoplay-lock";
-    const initialLocked = wv.dataset.noAutoplayLocked === "1";
+    const initialLocked = this.store.get(wv).locked;
     lockBtn.textContent = initialLocked ? "\u5DF2\u4FDD\u6D3B" : "\u4FDD\u6D3B";
     lockBtn.classList.toggle("is-locked", initialLocked);
     lockBtn.addEventListener("pointerdown", (e) => e.stopPropagation());
     lockBtn.addEventListener("click", (e) => {
       e.stopPropagation();
-      const locked = wv.dataset.noAutoplayLocked === "1";
-      wv.dataset.noAutoplayLocked = locked ? "0" : "1";
+      const locked = this.store.get(wv).locked;
+      this.store.get(wv).locked = !locked;
       lockBtn.textContent = locked ? "\u4FDD\u6D3B" : "\u5DF2\u4FDD\u6D3B";
       lockBtn.classList.toggle("is-locked", !locked);
       const node = wv.closest(".canvas-node") || this.napParent(wv);
       if (node)
-        node.dataset.noAutoplayLocked = wv.dataset.noAutoplayLocked;
+        this.store.container(node).locked = this.store.get(wv).locked;
     });
     zone.appendChild(lockBtn);
     const collapseBtn = ownerDoc.createElement("div");
@@ -2620,10 +2615,8 @@ var LiteWebviewsPlugin = class extends import_obsidian2.Plugin {
         if (isIframe || cur === node.dataset.noAutoplayActivatedSrc) {
           const alreadyManaged = this.liveCards.has(el);
           el.dataset.noAutoplayScreenshot = "live";
-          el.dataset.noAutoplayLocked = node.dataset.noAutoplayLocked || "0";
-          if (node.dataset.noAutoplayMuted !== void 0) {
-            el.dataset.noAutoplayMuted = node.dataset.noAutoplayMuted;
-          }
+          this.store.get(el).locked = this.store.container(node).locked;
+          this.store.get(el).muted = this.store.container(node).muted;
           this.liveCards.add(el);
           if (el.tagName === "IFRAME" && cat === "excalidraw") {
             this.applyIframePlugins(el);
@@ -2977,8 +2970,7 @@ var LiteWebviewsPlugin = class extends import_obsidian2.Plugin {
             }
             stored.srcdoc = stripPluginHtml(el.getAttribute("srcdoc") || "");
             stored.src = el.getAttribute("src") || "";
-            if (el.dataset.noAutoplayMuted !== void 0)
-              stored.muted = el.dataset.noAutoplayMuted;
+            stored.muted = this.store.get(el).muted;
             try {
               el.removeAttribute("srcdoc");
               el.removeAttribute("src");
@@ -3036,11 +3028,11 @@ var LiteWebviewsPlugin = class extends import_obsidian2.Plugin {
         if (!wv) {
           return;
         }
-        const locked = wv.dataset.noAutoplayLocked === "1";
-        wv.dataset.noAutoplayLocked = locked ? "0" : "1";
+        const locked = this.store.get(wv).locked;
+        this.store.get(wv).locked = !locked;
         const node = wv.closest(".canvas-node") || this.napParent(wv);
         if (node)
-          node.dataset.noAutoplayLocked = wv.dataset.noAutoplayLocked;
+          this.store.container(node).locked = this.store.get(wv).locked;
         if (this.napParent(wv)) {
           this.napParent(wv).querySelectorAll(".no-autoplay-lock").forEach((btn) => {
             btn.textContent = locked ? "\u4FDD\u6D3B" : "\u5DF2\u4FDD\u6D3B";
@@ -3098,11 +3090,11 @@ var LiteWebviewsPlugin = class extends import_obsidian2.Plugin {
   }
   /** 恢复 Excalidraw 快照型 iframe 的原始 srcdoc/src（关闭截图模式/恢复命令共用） */
   restoreIframeContent(el) {
+    var _a;
     const stored = this.iframeDocs.get(el);
     if (!stored)
       return false;
-    if (stored.muted !== void 0)
-      el.dataset.noAutoplayMuted = stored.muted;
+    this.store.get(el).muted = (_a = stored.muted) != null ? _a : null;
     try {
       if (stored.srcdoc)
         el.setAttribute("srcdoc", stored.srcdoc);
@@ -3126,7 +3118,7 @@ var LiteWebviewsPlugin = class extends import_obsidian2.Plugin {
         return;
       delete node.dataset.noAutoplayActivatedSrc;
       delete node.dataset.noAutoplayActivatedUntil;
-      delete node.dataset.noAutoplayLocked;
+      this.store.container(node).locked = false;
     } catch (e) {
     }
   }
@@ -3160,7 +3152,7 @@ var LiteWebviewsPlugin = class extends import_obsidian2.Plugin {
       }
     }
     el.dataset.noAutoplayScreenshot = "live";
-    el.dataset.noAutoplayLocked = "0";
+    this.store.get(el).locked = false;
     if (clearMarkers)
       this.clearActivationMarkers(el);
     this.removeCardButtons(el);
