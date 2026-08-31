@@ -1156,7 +1156,7 @@ var LiteWebviewsPlugin = class extends import_obsidian2.Plugin {
     if (!parent)
       return;
     const overlay = parent.querySelector(".no-autoplay-placeholder");
-    if (!overlay || overlay.dataset.noAutoplayKey !== key)
+    if (!overlay || this.store.get(overlay).src !== key)
       return;
     const info = await this.cachedImageInfo(key);
     if (!info)
@@ -1716,8 +1716,9 @@ var LiteWebviewsPlugin = class extends import_obsidian2.Plugin {
         continue;
       const ae = wv.ownerDocument ? wv.ownerDocument.activeElement : null;
       const focused = ae === wv;
-      if (wv.dataset.noAutoplayFocused === "1" !== focused) {
-        wv.dataset.noAutoplayFocused = focused ? "1" : "0";
+      const st = this.store.get(wv);
+      if (st.focused !== focused) {
+        st.focused = focused;
         if (focused)
           this.lastActiveWv = wv;
         this.applyOperating(wv, focused);
@@ -2148,7 +2149,7 @@ var LiteWebviewsPlugin = class extends import_obsidian2.Plugin {
     const ownerDoc = parent.ownerDocument || document;
     const overlay = ownerDoc.createElement("div");
     overlay.className = "no-autoplay-placeholder";
-    overlay.dataset.noAutoplayKey = src || "";
+    this.store.get(overlay).src = src || "";
     let startX = 0, startY = 0, down = false;
     overlay.addEventListener("pointerdown", (e) => {
       if (e.button === 2) {
@@ -2222,7 +2223,7 @@ var LiteWebviewsPlugin = class extends import_obsidian2.Plugin {
     this.cachedImageInfo(src).then((info) => {
       if (!info || !overlay.isConnected)
         return;
-      if (overlay.dataset.noAutoplayKey !== (src || ""))
+      if (this.store.get(overlay).src !== (src || ""))
         return;
       let img = overlay.querySelector("img.no-autoplay-shot");
       if (!img) {
@@ -2462,7 +2463,7 @@ var LiteWebviewsPlugin = class extends import_obsidian2.Plugin {
     zone.appendChild(collapseBtn);
     parent.appendChild(zone);
     this.ensureSizeObserver(wv);
-    this.applyOperating(wv, wv.dataset.noAutoplayFocused === "1");
+    this.applyOperating(wv, this.store.get(wv).focused);
   }
   removeCardButtons(wv) {
     const cleanup = this.statusCleanups.get(wv);
@@ -2543,7 +2544,7 @@ var LiteWebviewsPlugin = class extends import_obsidian2.Plugin {
    *  且卡片就在当前活动视图内。 */
   isViewingCard(wv, activeEl) {
     try {
-      if (wv.dataset.noAutoplayFocused === "1")
+      if (this.store.get(wv).focused)
         return true;
       const doc = wv.ownerDocument;
       if (!doc || typeof doc.hasFocus !== "function" || !doc.hasFocus())
@@ -2845,7 +2846,7 @@ var LiteWebviewsPlugin = class extends import_obsidian2.Plugin {
       this.webviewFocused = true;
       this.cancelTimers();
       if (wv.tagName === "WEBVIEW") {
-        wv.dataset.noAutoplayFocused = "1";
+        this.store.get(wv).focused = true;
         this.lastActiveWv = wv;
         this.applyOperating(wv, true);
       }
@@ -2856,7 +2857,7 @@ var LiteWebviewsPlugin = class extends import_obsidian2.Plugin {
         return;
       this.webviewFocused = false;
       if (wv.tagName === "WEBVIEW") {
-        wv.dataset.noAutoplayFocused = "0";
+        this.store.get(wv).focused = false;
         this.applyOperating(wv, false);
       }
     };

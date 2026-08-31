@@ -421,7 +421,7 @@ export default class LiteWebviewsPlugin extends Plugin {
 		const parent = this.napParent(wv);
 		if (!parent) return;
 		const overlay = parent.querySelector('.no-autoplay-placeholder');
-		if (!overlay || overlay.dataset.noAutoplayKey !== key) return;
+		if (!overlay || this.store.get(overlay).src !== key) return;
 		const info = await this.cachedImageInfo(key);
 		if (!info) return;
 		let img = overlay.querySelector('img.no-autoplay-shot');
@@ -1017,8 +1017,9 @@ export default class LiteWebviewsPlugin extends Plugin {
 			// 每张卡用自己窗口的 activeElement（popout 里的 webview 不在主窗口焦点链上）
 			const ae = wv.ownerDocument ? wv.ownerDocument.activeElement : null;
 			const focused = ae === wv;
-			if ((wv.dataset.noAutoplayFocused === '1') !== focused) {
-				wv.dataset.noAutoplayFocused = focused ? '1' : '0';
+			const st = this.store.get(wv);
+			if (st.focused !== focused) {
+				st.focused = focused;
 				if (focused) this.lastActiveWv = wv;
 				this.applyOperating(wv, focused);
 			}
@@ -1486,7 +1487,7 @@ export default class LiteWebviewsPlugin extends Plugin {
 		const ownerDoc = parent.ownerDocument || document;
 		const overlay = ownerDoc.createElement('div');
 		overlay.className = 'no-autoplay-placeholder';
-		overlay.dataset.noAutoplayKey = src || '';
+		this.store.get(overlay).src = src || '';
 
 		// 单击加载：按下时记录位置，移动超过阈值视为拖动（不触发加载，画布可正常拖动卡片）
 		let startX = 0,
@@ -1575,7 +1576,7 @@ export default class LiteWebviewsPlugin extends Plugin {
 		this.cachedImageInfo(src)
 			.then((info) => {
 				if (!info || !overlay.isConnected) return;
-				if (overlay.dataset.noAutoplayKey !== (src || '')) return;
+				if (this.store.get(overlay).src !== (src || '')) return;
 				let img = overlay.querySelector('img.no-autoplay-shot');
 				if (!img) {
 					img = ownerDoc.createElement('img');
@@ -1828,7 +1829,7 @@ export default class LiteWebviewsPlugin extends Plugin {
 
 		// 操作中显隐由 CSS 处理（焦点轮询 + 事件双通道）
 		this.ensureSizeObserver(wv);
-		this.applyOperating(wv, wv.dataset.noAutoplayFocused === '1');
+		this.applyOperating(wv, this.store.get(wv).focused);
 	}
 
 	removeCardButtons(wv) {
@@ -1910,7 +1911,7 @@ export default class LiteWebviewsPlugin extends Plugin {
 	 *  且卡片就在当前活动视图内。 */
 	isViewingCard(wv, activeEl) {
 		try {
-			if (wv.dataset.noAutoplayFocused === '1') return true;
+			if (this.store.get(wv).focused) return true;
 			const doc = wv.ownerDocument;
 			if (!doc || typeof doc.hasFocus !== 'function' || !doc.hasFocus()) return false;
 			return !!(activeEl && activeEl.contains(wv));
@@ -2271,7 +2272,7 @@ export default class LiteWebviewsPlugin extends Plugin {
 			this.webviewFocused = true;
 			this.cancelTimers();
 			if (wv.tagName === 'WEBVIEW') {
-				wv.dataset.noAutoplayFocused = '1';
+				this.store.get(wv).focused = true;
 				this.lastActiveWv = wv;
 				this.applyOperating(wv, true);
 			}
@@ -2281,7 +2282,7 @@ export default class LiteWebviewsPlugin extends Plugin {
 			if (!wv || isTempEmbed(wv)) return;
 			this.webviewFocused = false;
 			if (wv.tagName === 'WEBVIEW') {
-				wv.dataset.noAutoplayFocused = '0';
+				this.store.get(wv).focused = false;
 				this.applyOperating(wv, false);
 			}
 		};
