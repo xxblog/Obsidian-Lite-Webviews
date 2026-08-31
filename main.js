@@ -407,7 +407,9 @@ var LiteWebviewsSettingsTab = class extends import_obsidian.PluginSettingTab {
         }
       });
     });
-    new import_obsidian.Setting(containerEl).setName("\u6302\u8D77\u65F6\u5F7B\u5E95\u5378\u8F7D").setDesc("\u5B9E\u9A8C\u6027\uFF1A\u91CA\u653E\u66F4\u591A\u5185\u5B58").addToggle(
+    new import_obsidian.Setting(containerEl).setName("\u6302\u8D77\u65F6\u5F7B\u5E95\u5378\u8F7D").setDesc(
+      this.plugin.canKillRenderer() ? "\u5B9E\u9A8C\u6027\uFF1A\u91CA\u653E\u66F4\u591A\u5185\u5B58\u3002\u4F9D\u8D56 Obsidian \u7684\u975E\u516C\u5F00\u63A5\u53E3\uFF0C\u5347\u7EA7\u540E\u53EF\u80FD\u5931\u6548" : "\u26A0 \u5F53\u524D\u73AF\u5883\u4E0D\u652F\u6301\uFF08\u62FF\u4E0D\u5230 electron.remote\uFF09\uFF1A\u5F00\u542F\u540E\u4F1A\u9759\u9ED8\u964D\u7EA7\u4E3A\u666E\u901A\u6302\u8D77\uFF0C\u4E0D\u4F1A\u989D\u5916\u7701\u5185\u5B58"
+    ).addToggle(
       (t) => t.setValue(this.plugin.settings.killRendererOnSuspend).onChange(async (v) => {
         this.plugin.settings.killRendererOnSuspend = v;
         this.plugin.saveSettings();
@@ -772,6 +774,8 @@ var LiteWebviewsPlugin = class extends import_obsidian2.Plugin {
   }
   /** 清理缓存：force=true 无条件删除全部；否则仅当超限时删最旧文件直到达标（上限 0 = 不自动清理）。返回删除的文件数 */
   async cleanupCache(force = false) {
+    if (this._unloaded)
+      return 0;
     const limitBytes = (this.settings.cacheSizeLimitMB || 0) * 1024 * 1024;
     if (!force && limitBytes <= 0)
       return 0;
@@ -924,6 +928,8 @@ var LiteWebviewsPlugin = class extends import_obsidian2.Plugin {
   async saveScreenshot(src, nativeImage) {
     if (!src)
       return;
+    if (this._unloaded)
+      return;
     try {
       if (!nativeImage)
         return;
@@ -1075,6 +1081,8 @@ var LiteWebviewsPlugin = class extends import_obsidian2.Plugin {
       wv.setAttribute("src", doc ? htmlToDataUrl(injectMuteHtml(doc)) : src);
       await this.waitForLoadEvent(wv, 4e3);
       await new Promise((r) => setTimeout(r, TEMP_CAPTURE_SETTLE_MS));
+      if (this._unloaded)
+        return null;
       if (shouldAbort && shouldAbort())
         return null;
       return await wv.capturePage();
@@ -1407,6 +1415,23 @@ var LiteWebviewsPlugin = class extends import_obsidian2.Plugin {
       wv.addEventListener("did-navigate-in-page", reMute);
     }
   }
+  /** 在 webview 内执行脚本。
+   *  executeJavaScript 返回的是 Promise：webview 已销毁、尚未 attach 或正在导航时
+   *  会 reject，而同步 try/catch 抓不到异步 rejection —— 不显式 .catch() 的话，
+   *  每次卡片销毁都会在控制台留下 unhandled rejection（onunload 里对正在销毁的
+   *  webview 调用尤其必现）。失败本身无需处理：背景修复是尽力而为的增强，
+   *  注入不上就维持页面原样。 */
+  execInWebview(wv, js) {
+    if (!wv || typeof wv.executeJavaScript !== "function")
+      return;
+    try {
+      const p = wv.executeJavaScript(js);
+      if (p && typeof p.catch === "function")
+        p.catch(() => {
+        });
+    } catch (e) {
+    }
+  }
   /** 修复网页背景透明：在 webview 加载/导航后注入低优先级不透明兜底背景。
    *  透明透出控件是画布/Excalidraw 嵌入特有的合成问题；网页浏览器标签页整页
    *  显示不存在该问题，跳过后每次导航可省两次跨进程 executeJavaScript。 */
@@ -1427,25 +1452,15 @@ var LiteWebviewsPlugin = class extends import_obsidian2.Plugin {
       }
       delete wv.dataset.noAutoplayBgFixHooked;
       delete wv.dataset.noAutoplayBgFixApplied;
-      if (typeof wv.executeJavaScript === "function") {
-        try {
-          wv.executeJavaScript(BG_FIX_CLEANUP_JS);
-        } catch (e) {
-        }
-      }
+      this.execInWebview(wv, BG_FIX_CLEANUP_JS);
     };
     if (!want) {
       cleanup();
       return;
     }
     const applyFix = () => {
-      try {
-        if (typeof wv.executeJavaScript === "function") {
-          wv.executeJavaScript(BG_FIX_CLEANUP_JS);
-          wv.executeJavaScript(BG_FIX_JS);
-        }
-      } catch (e) {
-      }
+      this.execInWebview(wv, BG_FIX_CLEANUP_JS);
+      this.execInWebview(wv, BG_FIX_JS);
     };
     if (!this.bgHandlers.has(wv)) {
       const fix = () => applyFix();
@@ -1802,6 +1817,14 @@ var LiteWebviewsPlugin = class extends import_obsidian2.Plugin {
     }
     return null;
   }
+  /** "挂起时彻底卸载"依赖的非公开接口是否可用。
+   *  该能力建立在 window.electron.remote 之上——它不是 Obsidian 的公开 API，
+   *  Obsidian 升级 Electron 或收紧 remote 后可能随时消失。届时 killRenderer 会
+   *  一路返回 false、静默降级为普通的 about:blank 挂起，用户不会看到任何异常，
+   *  也就无从判断开关为什么"没效果"——所以设置页要据此显式告知。 */
+  canKillRenderer() {
+    return !!this.remoteWebContents();
+  }
   /** 杀掉 webview 的渲染进程（元素留在 DOM，激活时 reload 复活）。
    *  通过 window.electron.remote（Obsidian 渲染进程全局可用）拿到 webContents 后
    *  forcefullyCrashRenderer。注意：页面【加载中】被杀会被 Chromium 自动重试复活，
@@ -1926,6 +1949,8 @@ var LiteWebviewsPlugin = class extends import_obsidian2.Plugin {
     try {
       await this.waitForLoad(wv, 5e3);
       await new Promise((r) => setTimeout(r, LIVE_CAPTURE_SETTLE_MS));
+      if (this._unloaded)
+        return;
       if (!wv.isConnected)
         return;
       if (wv.dataset.noAutoplayScreenshot !== "live")
@@ -3109,11 +3134,8 @@ var LiteWebviewsPlugin = class extends import_obsidian2.Plugin {
         }
         this.bgHandlers.delete(wv);
       }
-      if (wv.dataset.noAutoplayBgFixApplied === "1" && typeof wv.executeJavaScript === "function") {
-        try {
-          wv.executeJavaScript(BG_FIX_CLEANUP_JS);
-        } catch (e) {
-        }
+      if (wv.dataset.noAutoplayBgFixApplied === "1") {
+        this.execInWebview(wv, BG_FIX_CLEANUP_JS);
       }
       delete wv.dataset.noAutoplayBgFixHooked;
       delete wv.dataset.noAutoplayBgFixApplied;

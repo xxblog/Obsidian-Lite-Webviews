@@ -177,6 +177,7 @@ export default class LiteWebviewsPlugin extends Plugin {
 
 	/** 清理缓存：force=true 无条件删除全部；否则仅当超限时删最旧文件直到达标（上限 0 = 不自动清理）。返回删除的文件数 */
 	async cleanupCache(force = false) {
+		if (this._unloaded) return 0; // 卸载后不再动磁盘（onunload 不调用本方法，守卫不会误伤）
 		const limitBytes = (this.settings.cacheSizeLimitMB || 0) * 1024 * 1024;
 		if (!force && limitBytes <= 0) return 0;
 		this.cacheInfoMemo.clear(); // 即将删文件，memo 里的路径/mtime 不可再信
@@ -327,6 +328,9 @@ export default class LiteWebviewsPlugin extends Plugin {
 
 	async saveScreenshot(src, nativeImage) {
 		if (!src) return;
+		// 卸载守卫：抓图链最长跨越约 6 秒（等加载 + 渲染静置），期间插件可能已被卸载。
+		// 这里是全插件唯一的 writeBinary 出口，守住这一处即可杜绝"卸载后仍在写盘"。
+		if (this._unloaded) return;
 		try {
 			// 空图/损坏图绝不写入缓存（防止污染）
 			if (!nativeImage) return;
@@ -493,6 +497,7 @@ export default class LiteWebviewsPlugin extends Plugin {
 			wv.setAttribute('src', doc ? htmlToDataUrl(injectMuteHtml(doc)) : src);
 			await this.waitForLoadEvent(wv, 4000);
 			await new Promise((r) => setTimeout(r, TEMP_CAPTURE_SETTLE_MS)); // 渲染静置
+			if (this._unloaded) return null; // 上面两个 await 合计最长约 4.8 秒
 			if (shouldAbort && shouldAbort()) return null;
 			return await wv.capturePage();
 		} catch (e) {
@@ -846,6 +851,22 @@ export default class LiteWebviewsPlugin extends Plugin {
 		}
 	}
 
+	/** 在 webview 内执行脚本。
+	 *  executeJavaScript 返回的是 Promise：webview 已销毁、尚未 attach 或正在导航时
+	 *  会 reject，而同步 try/catch 抓不到异步 rejection —— 不显式 .catch() 的话，
+	 *  每次卡片销毁都会在控制台留下 unhandled rejection（onunload 里对正在销毁的
+	 *  webview 调用尤其必现）。失败本身无需处理：背景修复是尽力而为的增强，
+	 *  注入不上就维持页面原样。 */
+	execInWebview(wv, js) {
+		if (!wv || typeof wv.executeJavaScript !== 'function') return;
+		try {
+			const p = wv.executeJavaScript(js);
+			if (p && typeof p.catch === 'function') p.catch(() => {});
+		} catch (e) {
+			/* 同步抛出（元素已不是 webview）同样忽略 */
+		}
+	}
+
 	/** 修复网页背景透明：在 webview 加载/导航后注入低优先级不透明兜底背景。
 	 *  透明透出控件是画布/Excalidraw 嵌入特有的合成问题；网页浏览器标签页整页
 	 *  显示不存在该问题，跳过后每次导航可省两次跨进程 executeJavaScript。 */
@@ -866,28 +887,16 @@ export default class LiteWebviewsPlugin extends Plugin {
 			}
 			delete wv.dataset.noAutoplayBgFixHooked;
 			delete wv.dataset.noAutoplayBgFixApplied;
-			if (typeof wv.executeJavaScript === 'function') {
-				try {
-					wv.executeJavaScript(BG_FIX_CLEANUP_JS);
-				} catch (e) {
-					/* ignore */
-				}
-			}
+			this.execInWebview(wv, BG_FIX_CLEANUP_JS);
 		};
 		if (!want) {
 			cleanup();
 			return;
 		}
 		const applyFix = () => {
-			try {
-				if (typeof wv.executeJavaScript === 'function') {
-					// 先清除旧版本可能残留的强制内联白底，再注入低优先级兜底背景
-					wv.executeJavaScript(BG_FIX_CLEANUP_JS);
-					wv.executeJavaScript(BG_FIX_JS);
-				}
-			} catch (e) {
-				/* ignore */
-			}
+			// 先清除旧版本可能残留的强制内联白底，再注入低优先级兜底背景
+			this.execInWebview(wv, BG_FIX_CLEANUP_JS);
+			this.execInWebview(wv, BG_FIX_JS);
 		};
 		// 挂钩以本实例的 bgHandlers 为准（插件重载后旧监听已在 onunload 摘除，这里会
 		// 重新挂上，比旧的 dataset 标记更准确）；只在首次接管且页面已加载完时立即补
@@ -1288,6 +1297,15 @@ export default class LiteWebviewsPlugin extends Plugin {
 		return null;
 	}
 
+	/** "挂起时彻底卸载"依赖的非公开接口是否可用。
+	 *  该能力建立在 window.electron.remote 之上——它不是 Obsidian 的公开 API，
+	 *  Obsidian 升级 Electron 或收紧 remote 后可能随时消失。届时 killRenderer 会
+	 *  一路返回 false、静默降级为普通的 about:blank 挂起，用户不会看到任何异常，
+	 *  也就无从判断开关为什么"没效果"——所以设置页要据此显式告知。 */
+	canKillRenderer() {
+		return !!this.remoteWebContents();
+	}
+
 	/** 杀掉 webview 的渲染进程（元素留在 DOM，激活时 reload 复活）。
 	 *  通过 window.electron.remote（Obsidian 渲染进程全局可用）拿到 webContents 后
 	 *  forcefullyCrashRenderer。注意：页面【加载中】被杀会被 Chromium 自动重试复活，
@@ -1413,6 +1431,7 @@ export default class LiteWebviewsPlugin extends Plugin {
 		try {
 			await this.waitForLoad(wv, 5000);
 			await new Promise((r) => setTimeout(r, LIVE_CAPTURE_SETTLE_MS)); // 静置等待 JS 渲染
+			if (this._unloaded) return; // 上面两个 await 合计最长约 6 秒，期间插件可能已卸载
 			if (!wv.isConnected) return;
 			if (wv.dataset.noAutoplayScreenshot !== 'live') return;
 			const src = wv.dataset.noAutoplaySrc;
@@ -2712,12 +2731,8 @@ export default class LiteWebviewsPlugin extends Plugin {
 				}
 				this.bgHandlers.delete(wv);
 			}
-			if (wv.dataset.noAutoplayBgFixApplied === '1' && typeof wv.executeJavaScript === 'function') {
-				try {
-					wv.executeJavaScript(BG_FIX_CLEANUP_JS);
-				} catch (e) {
-					/* ignore */
-				}
+			if (wv.dataset.noAutoplayBgFixApplied === '1') {
+				this.execInWebview(wv, BG_FIX_CLEANUP_JS);
 			}
 			delete wv.dataset.noAutoplayBgFixHooked;
 			delete wv.dataset.noAutoplayBgFixApplied;

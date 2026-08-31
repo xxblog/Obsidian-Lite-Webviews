@@ -218,7 +218,11 @@ export class LiteWebviewsSettingsTab extends PluginSettingTab {
 			});
 		new Setting(containerEl)
 			.setName('挂起时彻底卸载')
-			.setDesc('实验性：释放更多内存')
+			.setDesc(
+				this.plugin.canKillRenderer()
+					? '实验性：释放更多内存。依赖 Obsidian 的非公开接口，升级后可能失效'
+					: '⚠ 当前环境不支持（拿不到 electron.remote）：开启后会静默降级为普通挂起，不会额外省内存'
+			)
 			.addToggle((t) =>
 				t.setValue(this.plugin.settings.killRendererOnSuspend).onChange(async (v) => {
 					this.plugin.settings.killRendererOnSuspend = v;
